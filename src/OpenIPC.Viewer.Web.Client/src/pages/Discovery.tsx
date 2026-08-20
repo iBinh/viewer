@@ -16,6 +16,9 @@ export function Discovery() {
   const { t } = useI18n()
   const [scan, setScan] = useState<ScanDto | null>(null)
   const [deepScan, setDeepScan] = useState(false)
+  // Blank = sweep the server's own subnet. Typed = sweep exactly that, which is
+  // what makes a camera on another VLAN reachable at all from here.
+  const [ipRange, setIpRange] = useState('')
   const [knownHosts, setKnownHosts] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<DiscoveredDeviceDto | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -56,10 +59,15 @@ export function Discovery() {
   const start = async () => {
     setError(null)
     try {
-      const s = await api.startScan(deepScan)
+      const s = await api.startScan(deepScan, ipRange.trim())
       setScan(s)
       poll(s.id)
     } catch (e) {
+      if (e instanceof ApiError && e.code === 'validation') {
+        // Almost always the range: the server parses it and says why.
+        setError(e.details?.length ? e.details.join(', ') : t('Discovery.IpRangeInvalid'))
+        return
+      }
       setError(e instanceof ApiError && e.code === 'scan_in_progress'
         ? t('Discovery.Busy')
         : t('Discovery.Failed'))
@@ -85,6 +93,10 @@ export function Discovery() {
                  onChange={(e) => setDeepScan(e.target.checked)} />
           {t('Discovery.DeepScan')}
         </label>
+        <input className="mono" style={{ width: 240 }} value={ipRange} disabled={running}
+               placeholder={t('Discovery.IpRangePlaceholder')}
+               aria-label={t('Discovery.IpRange')}
+               onChange={(e) => setIpRange(e.target.value)} />
         {running ? (
           <button onClick={() => void stop()}>{t('Discovery.Stop')}</button>
         ) : (
@@ -93,6 +105,7 @@ export function Discovery() {
       </div>
 
       <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>{t('Discovery.DeepScanNote')}</p>
+      <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>{t('Discovery.IpRangeNote')}</p>
       {error && <p className="err">{error}</p>}
 
       {running && (

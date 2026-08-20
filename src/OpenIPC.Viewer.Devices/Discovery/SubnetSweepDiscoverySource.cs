@@ -9,19 +9,24 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using OpenIPC.Viewer.Core.Discovery;
 using OpenIPC.Viewer.Core.Majestic;
+using OpenIPC.Viewer.Core.Onvif;
 using OpenIPC.Viewer.Core.Onvif.Discovery;
 using OpenIPC.Viewer.Core.Services;
 using OpenIPC.Viewer.Core.Settings;
 
 namespace OpenIPC.Viewer.Devices.Discovery;
 
-// Active /24 sweep — the only source that finds OpenIPC cameras running neither
-// ONVIF nor mDNS. Opt-in (DeepScan) because it knocks on every host of the LAN.
+// Active sweep — the only source that finds OpenIPC cameras running neither
+// ONVIF nor mDNS. Opt-in (DeepScan, or a hand-typed range) because it knocks on
+// every host of the LAN.
 //
 // Cross-platform by construction: unprivileged TCP connects + HTTP only (no raw
 // sockets/root), and the subnet is derived from the local IPv4 as a plain /24 —
 // no GatewayAddresses / IPv4Mask (both throw on Android's BCL). Capped at 254
-// hosts on purpose: it never sweeps a /16.
+// hosts on purpose: it never sweeps a /16 by itself. DiscoveryOptions.Range
+// overrides that derived subnet when the user knows better — a camera on another
+// VLAN, or a host whose "own" subnet isn't the camera one — and carries its own
+// ceiling (IpRange.MaxHosts).
 public sealed class SubnetSweepDiscoverySource : IDiscoverySource
 {
     private const int MaxConcurrency = 64;
@@ -33,6 +38,7 @@ public sealed class SubnetSweepDiscoverySource : IDiscoverySource
     private readonly IUserSettingsAccessor _settings;
     private readonly IReachabilityProbe _probe;
     private readonly IMajesticClient _majestic;
+    private readonly IOnvifFingerprint _onvif;
     private readonly ILogger<SubnetSweepDiscoverySource> _logger;
 
     public SubnetSweepDiscoverySource(
@@ -40,36 +46,30 @@ public sealed class SubnetSweepDiscoverySource : IDiscoverySource
         IUserSettingsAccessor settings,
         IReachabilityProbe probe,
         IMajesticClient majestic,
+        IOnvifFingerprint onvif,
         ILogger<SubnetSweepDiscoverySource> logger)
     {
         _nics = nics;
         _settings = settings;
         _probe = probe;
         _majestic = majestic;
+        _onvif = onvif;
         _logger = logger;
     }
 
     public string Name => "Subnet sweep";
 
-    public bool IsEnabled(DiscoveryOptions options) => options.DeepScan;
+    public bool IsEnabled(DiscoveryOptions options) => options.DeepScan || options.Range is not null;
 
     public async IAsyncEnumerable<DiscoveredDevice> ScanAsync(
         DiscoveryOptions options, IProgress<double>? progress, [EnumeratorCancellation] CancellationToken ct)
     {
-        var local = NetworkInterfaceSelector.ResolveBindAddress(
-            _nics.GetCandidates(), _settings.PreferredNetworkInterface);
-
-        if (string.IsNullOrEmpty(local) || !TryGetPrefix(local!, out var prefix, out var ownLast))
+        var hosts = ResolveHosts(options);
+        if (hosts.Count == 0)
         {
-            _logger.LogDebug("Subnet sweep: no local /24 to scan; skipping");
             progress?.Report(1.0);
             yield break;
         }
-
-        var hosts = Enumerable.Range(1, 254)
-            .Where(i => i != ownLast)
-            .Select(i => $"{prefix}.{i}")
-            .ToList();
 
         var channel = Channel.CreateUnbounded<DiscoveredDevice>();
         var gate = new SemaphoreSlim(MaxConcurrency);
@@ -105,12 +105,43 @@ public sealed class SubnetSweepDiscoverySource : IDiscoverySource
         await producer.ConfigureAwait(false);
     }
 
-    // Knock on the RTSP + HTTP ports; an HTTP hit also gets a Majestic fingerprint.
-    // Returns null for a silent host so the aggregator never sees it.
+    // What to knock on: the hand-typed range when there is one, otherwise the
+    // local /24 as before. Either way our own address is dropped — it is never
+    // a camera, and probing ourselves just wastes a slot.
+    private List<string> ResolveHosts(DiscoveryOptions options)
+    {
+        var local = NetworkInterfaceSelector.ResolveBindAddress(
+            _nics.GetCandidates(), _settings.PreferredNetworkInterface);
+
+        if (options.Range is { } range)
+        {
+            var typed = range.EnumerateHosts()
+                .Where(h => !string.Equals(h, local, StringComparison.Ordinal))
+                .ToList();
+            _logger.LogDebug("Subnet sweep: scanning {Count} host(s) from range {Range}", typed.Count, range);
+            return typed;
+        }
+
+        if (string.IsNullOrEmpty(local) || !TryGetPrefix(local!, out var prefix, out var ownLast))
+        {
+            _logger.LogDebug("Subnet sweep: no local /24 to scan; skipping");
+            return new List<string>();
+        }
+
+        return Enumerable.Range(1, 254)
+            .Where(i => i != ownLast)
+            .Select(i => $"{prefix}.{i}")
+            .ToList();
+    }
+
+    // Knock on the RTSP + HTTP ports; an HTTP hit also gets a Majestic and an
+    // ONVIF fingerprint. Returns null for a silent host so the aggregator never
+    // sees it.
     private async Task<DiscoveredDevice?> ProbeHostAsync(string host, CancellationToken ct)
     {
         var protocols = DiscoveryProtocol.None;
         var ports = new List<int>();
+        Uri? onvifUri = null;
 
         foreach (var port in RtspPorts)
         {
@@ -141,14 +172,25 @@ public sealed class SubnetSweepDiscoverySource : IDiscoverySource
                     _logger.LogDebug(ex, "Majestic fingerprint failed for {Host}:{Port}", host, port);
                 }
             }
+
+            // WS-Discovery is multicast, so it never reaches a camera on a
+            // routed subnet (a VPN/mesh tunnel, another VLAN) — exactly the case
+            // the hand-typed range exists for. Asking the address directly is
+            // the only way such a camera gets recognised as ONVIF, and carrying
+            // the URI back is what lets the add flow run the real probe instead
+            // of guessing an RTSP URL.
+            onvifUri ??= await _onvif.ProbeAsync(host, port, ct).ConfigureAwait(false);
+            if (onvifUri is not null)
+                protocols |= DiscoveryProtocol.Onvif;
         }
 
         if (protocols == DiscoveryProtocol.None)
             return null;
         // A positive fingerprint names the device — the dialog shows the label
-        // instead of "(unknown model)".
+        // instead of "(unknown model)". ONVIF gets no label here: its real
+        // manufacturer/model arrive with the full probe at add time.
         var model = protocols.HasFlag(DiscoveryProtocol.Majestic) ? "OpenIPC" : null;
-        return new DiscoveredDevice(host, protocols, ports, Model: model);
+        return new DiscoveredDevice(host, protocols, ports, Model: model, OnvifServiceUri: onvifUri);
     }
 
     private static bool TryGetPrefix(string ip, out string prefix, out int lastOctet)

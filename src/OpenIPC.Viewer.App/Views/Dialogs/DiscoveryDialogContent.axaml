@@ -10,7 +10,7 @@
              FontSize="{StaticResource FontSizeBase}"
              Foreground="{StaticResource TextPrimaryBrush}">
 
-  <Grid RowDefinitions="Auto,Auto,*,Auto,Auto" Margin="24">
+  <Grid RowDefinitions="Auto,Auto,Auto,*,Auto,Auto" Margin="24">
 
     <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,12">
       <StackPanel Grid.Column="0" Spacing="4">
@@ -38,8 +38,49 @@
       </StackPanel>
     </Grid>
 
+    <!-- Where a deep scan goes. The subnets come from the OS routing table and
+         arrive ticked, so a camera on another VLAN or behind a VPN needs no
+         typing at all; the box below is for the odd range routes don't show.
+         Bad input or an over-wide selection shows at the bottom and disables Scan. -->
+    <StackPanel Grid.Row="1" Spacing="6" Margin="0,0,0,12">
+      <ItemsControl ItemsSource="{Binding ScanTargets}" IsVisible="{Binding HasScanTargets}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate DataType="vm:ScanTargetRowVm">
+            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                      IsEnabled="{Binding $parent[UserControl].((vm:DiscoveryDialogViewModel)DataContext).ScanInProgress, Converter={x:Static BoolConverters.Not}}"
+                      Margin="0,0,0,2">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="{Binding Cidr}"
+                           FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource TextPrimaryBrush}" />
+                <TextBlock Text="{Binding Detail}"
+                           FontSize="{StaticResource FontSizeSm}"
+                           VerticalAlignment="Center"
+                           Foreground="{StaticResource TextTertiaryBrush}" />
+              </StackPanel>
+            </CheckBox>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <TextBox Text="{Binding IpRangeText, Mode=TwoWay}"
+               IsEnabled="{Binding !ScanInProgress}"
+               FontFamily="{StaticResource FontMono}"
+               PlaceholderText="{Binding [Discovery.IpRange.Placeholder], Source={x:Static svc:Localizer.Instance}}" />
+
+      <TextBlock Text="{Binding SweepSummary}"
+                 IsVisible="{Binding SweepSummary, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                 FontSize="{StaticResource FontSizeSm}"
+                 Foreground="{StaticResource TextSecondaryBrush}" />
+      <TextBlock Text="{Binding IpRangeError}"
+                 IsVisible="{Binding IpRangeError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                 Foreground="{StaticResource DangerBrush}"
+                 FontSize="{StaticResource FontSizeSm}"
+                 TextWrapping="Wrap" />
+    </StackPanel>
+
     <!-- Scan progress (0..1), shown only while scanning. -->
-    <ProgressBar Grid.Row="1"
+    <ProgressBar Grid.Row="2"
                  Minimum="0" Maximum="1"
                  Value="{Binding ScanProgress}"
                  IsVisible="{Binding ScanInProgress}"
@@ -47,7 +88,7 @@
                  Margin="0,0,0,12"
                  Foreground="{StaticResource AccentBrush}" />
 
-    <Border Grid.Row="2"
+    <Border Grid.Row="3"
             Background="{StaticResource Bg2Brush}"
             BorderBrush="{StaticResource BorderWeakBrush}"
             BorderThickness="1"
@@ -99,7 +140,7 @@
       </ListBox>
     </Border>
 
-    <StackPanel Grid.Row="3" Spacing="8" Margin="0,16,0,0"
+    <StackPanel Grid.Row="4" Spacing="8" Margin="0,16,0,0"
                 IsVisible="{Binding IsRowSelected}">
       <Grid ColumnDefinitions="*,12,*">
         <StackPanel Grid.Column="0" Spacing="6">
@@ -117,7 +158,7 @@
                 Foreground="{StaticResource TextSecondaryBrush}" />
     </StackPanel>
 
-    <Grid Grid.Row="4" ColumnDefinitions="*,Auto,Auto" Margin="0,16,0,0">
+    <Grid Grid.Row="5" ColumnDefinitions="*,Auto,Auto" Margin="0,16,0,0">
       <Button Grid.Column="1"
               Name="CancelButton"
               Content="{Binding [Common.Cancel], Source={x:Static svc:Localizer.Instance}}"

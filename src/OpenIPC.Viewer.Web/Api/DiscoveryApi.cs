@@ -47,8 +47,23 @@ public static class DiscoveryApi
                 ? TimeSpan.FromSeconds(Math.Min(s, MaxScanTimeout.TotalSeconds))
                 : DefaultScanTimeout;
             var deep = body?.DeepScan ?? false;
-            var scan = store.Start(new DiscoveryOptions(timeout, deep));
-            Audit(ctx, "discovery.scan", deep ? "deep" : "passive");
+
+            // An explicit range sweeps exactly those addresses instead of the
+            // server's own subnet — the only way to reach a camera on another
+            // VLAN from a server that isn't on it. Rejected loudly rather than
+            // ignored: silently sweeping the wrong subnet reads as "no cameras".
+            IpRange? range = null;
+            var rangeText = body?.IpRange;
+            if (!string.IsNullOrWhiteSpace(rangeText)
+                && !IpRange.TryParse(rangeText, out range, out var rangeError))
+            {
+                return ValidationError(rangeError == IpRangeParseError.TooLarge
+                    ? $"ipRange covers more than {IpRange.MaxHosts} addresses"
+                    : "ipRange must be like 192.168.1.0/24, 192.168.1.10-200, or a single address");
+            }
+
+            var scan = store.Start(new DiscoveryOptions(timeout, deep, range));
+            Audit(ctx, "discovery.scan", range?.ToString() ?? (deep ? "deep" : "passive"));
             return Results.Json(Describe(scan));
         });
 
@@ -257,7 +272,9 @@ internal sealed record CameraDraft(
         Error: error);
 }
 
-internal sealed record DiscoveryScanRequest(bool? DeepScan, int? TimeoutSeconds);
+// IpRange: blank/absent -> sweep the server's own /24 (when DeepScan is on);
+// set -> sweep exactly that range, deep or not.
+internal sealed record DiscoveryScanRequest(bool? DeepScan, int? TimeoutSeconds, string? IpRange);
 
 internal sealed record DiscoveryProbeRequest(string? Host, int? OnvifPort, string? Username, string? Password);
 

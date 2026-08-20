@@ -12,10 +12,28 @@ RTSP URI.
 Pick a camera → enter credentials → the editor pre-fills name / host /
 RTSP / ONVIF profile. Save.
 
+**IP range** — leave it blank and a deep scan sweeps the subnet this
+machine is on. Type one and it sweeps exactly that instead, which is how
+you reach a camera the machine doesn't share a subnet with. Accepted:
+
+| Typed                         | Sweeps                        |
+|-------------------------------|-------------------------------|
+| `192.168.1.0/24`              | `192.168.1.1` … `192.168.1.254` |
+| `192.168.1.10-192.168.1.200`  | that span                     |
+| `192.168.1.10-200`            | the same, last octet only     |
+| `192.168.1.64`                | one host                      |
+
+Several at once, separated by commas or spaces. Filling the field also
+switches the sweep on — the *Deep scan* checkbox isn't needed as well. At
+most 4096 addresses per scan; anything wider is refused rather than run
+for minutes.
+
 If discovery turns up nothing:
 - Your router is blocking multicast (check WiFi AP settings — some block
   it on guest networks by default).
-- The camera is on a different VLAN.
+- The camera is on a different VLAN — type that VLAN's range into **IP
+  range** and scan again (it has to be routable from here, discovery
+  can't cross a firewall that drops the traffic).
 - ONVIF is disabled in the camera config (Majestic ships with it disabled
   in some firmware revisions — flip `service.onvif.enabled = true`).
 

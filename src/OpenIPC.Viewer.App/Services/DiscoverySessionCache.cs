@@ -19,6 +19,16 @@ public sealed class DiscoverySessionCache
     public string Password { get; set; } = "";
     public bool DeepScan { get; set; }
 
+    // Raw text of the hand-typed sweep range, kept unparsed so reopening the
+    // dialog shows exactly what was typed (including a half-finished entry).
+    // Empty = sweep the auto-detected local /24.
+    public string IpRangeText { get; set; } = "";
+
+    // CIDRs of auto-detected subnets the user unticked. Stored as the exclusion
+    // rather than the selection so a subnet that appears later (a VPN brought up
+    // mid-session) arrives ticked, like every other one.
+    public HashSet<string> DeselectedTargets { get; } = new(StringComparer.Ordinal);
+
     // "Use these credentials for all cameras" — on (default) carries the typed
     // login into the next add; off makes every camera start with blank fields
     // (mixed-credential parks).
