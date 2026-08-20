@@ -201,7 +201,12 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
         if (parts.Count == 0)
         {
             _effectiveRange = null;
-            SweepSummary = "";
+            // With no targets to offer, Deep scan still sweeps the subnet the
+            // source works out for itself — say so, rather than leaving the line
+            // blank and letting a 254-host sweep come as a surprise.
+            SweepSummary = DeepScan && ScanTargets.Count == 0
+                ? Localizer.Instance["Discovery.Sweep.SummaryLocal"]
+                : "";
             IpRangeError = null;
             return;
         }
@@ -261,7 +266,14 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
 
         try
         {
-            var options = new DiscoveryOptions(TimeSpan.FromSeconds(6), DeepScan, _effectiveRange);
+            // Unticking every target means "don't sweep", and has to be passed
+            // as such: the sweep source enables on DeepScan alone and would fall
+            // back to deriving the local /24, running a 254-host sweep the
+            // dialog just told the user it would not run. When no targets were
+            // offered at all there is nothing to untick, so Deep scan keeps its
+            // original meaning of "sweep whatever subnet you can work out".
+            var sweep = DeepScan && (_effectiveRange is not null || ScanTargets.Count == 0);
+            var options = new DiscoveryOptions(TimeSpan.FromSeconds(6), sweep, _effectiveRange);
             var progress = new Progress<double>(p => ScanProgress = p);
 
             await foreach (var device in _aggregator.ScanAsync(options, progress, ct).ConfigureAwait(true))

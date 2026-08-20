@@ -53,12 +53,12 @@ public sealed class OnvifHttpFingerprint : IOnvifFingerprint, IDisposable
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
                 .ConfigureAwait(false);
 
-            // 401 is decided on the status alone, so don't pay for its body.
-            var body = (int)response.StatusCode == 401
-                ? null
-                : await ReadBoundedAsync(response, ct).ConfigureAwait(false);
+            // Read on every status: a device that faults or challenges this call
+            // still names the onvif.org namespace in the body if it is really an
+            // ONVIF stack, and the status on its own proves nothing.
+            var body = await ReadBoundedAsync(response, ct).ConfigureAwait(false);
 
-            if (!OnvifProbeSignature.LooksLikeOnvif((int)response.StatusCode, body))
+            if (!OnvifProbeSignature.LooksLikeOnvif(body))
                 return null;
 
             _logger.LogDebug("ONVIF fingerprint hit at {Uri}", uri);

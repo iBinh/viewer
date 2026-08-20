@@ -27,14 +27,19 @@ public static class OnvifProbeSignature
     /// <summary>
     /// Whether a response to <see cref="RequestEnvelope"/> came from an ONVIF service.
     /// </summary>
-    public static bool LooksLikeOnvif(int statusCode, string? body)
+    /// <remarks>
+    /// Content is the only accepted evidence, whatever the status code. An
+    /// earlier version also took a bare 401 as proof, on the theory that an
+    /// unrelated server would 404 a path it doesn't serve — but plenty of
+    /// embedded web servers (routers, NAS boxes) put their whole web root behind
+    /// HTTP Basic auth and challenge *every* path, which made each one look like
+    /// a high-confidence ONVIF camera. Missing the rare firmware that guards
+    /// GetSystemDateAndTime — which the ONVIF Core spec requires to be callable
+    /// without credentials — is the cheaper mistake: such a device still shows up
+    /// from its open RTSP/HTTP ports and can still be added by hand.
+    /// </remarks>
+    public static bool LooksLikeOnvif(string? body)
     {
-        // A 401 on this exact path means something is guarding an ONVIF service.
-        // GetSystemDateAndTime is specified as unauthenticated, but a few
-        // firmwares put the whole endpoint behind auth anyway — and an unrelated
-        // web server 404s a path it doesn't know rather than challenging for it.
-        if (statusCode == 401) return true;
-
         if (string.IsNullOrEmpty(body)) return false;
 
         // The onvif.org namespace is the decisive marker, and it survives the
