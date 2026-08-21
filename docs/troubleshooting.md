@@ -73,6 +73,25 @@ always-on, run a relay (MediaMTX / Frigate) on a server.
 `UIFileSharingEnabled = YES`; if files still don't appear, force-quit
 and reopen the app once to nudge `LSSupportsOpeningDocumentsInPlace`.
 
+## Web console (`--server-only`)
+
+**Page loads but says the UI isn't there / only the API answers.** The React SPA
+is compiled into the binary at build time by an `npm` step. A build made on a
+machine without Node (or with `-p:BuildWebClient=false`) ships API-only. Install
+Node and rebuild, or use a release archive.
+
+**Can't reach it from another device.** Without `--lan` the server binds to
+`127.0.0.1` on purpose. Add `--lan` (and mind that there is no TLS at this
+layer — put it behind a reverse proxy for anything wider than a trusted LAN).
+
+**Don't know the admin password.** If `OPENIPC_WEB_ADMIN_PASSWORD` isn't set, a
+random one is generated and printed to the log on every start — grab it from
+`logs/`, or set the variable and restart.
+
+**Deep scan finds nothing from the server.** A server-side sweep is restricted
+to private ranges (`10/8`, `172.16/12`, `192.168/16`) and refuses its own
+loopback. Anything else has to be reached from the desktop app instead.
+
 ## Cross-platform
 
 **App opens with no cameras after upgrade.** Database lives in the
