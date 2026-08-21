@@ -6,14 +6,21 @@
 
 .NOTES
   Source: BtbN/FFmpeg-Builds GitHub releases (https://github.com/BtbN/FFmpeg-Builds).
-  Version pin: n7.1 (matches FFmpeg.AutoGen 7.1.x bindings).
+  Version pin: n7.1 (matches FFmpeg.AutoGen 7.1.x bindings), taken from a dated
+  release rather than the rolling `latest` tag - `latest` only keeps the branches
+  BtbN currently builds, and n7.1 was dropped from it in August 2026 (master /
+  n8.1 / n9.0 remain), which 404'd this script. The SHA-256 below turns a swapped
+  or truncated archive into a failure here instead of at runtime.
   Build flavor: lgpl-shared (no GPL components; safe to redistribute alongside
   a closed-source app provided DLLs remain replaceable).
 #>
 [CmdletBinding()]
 param(
-    [string]$FfmpegVersion = "n7.1",
-    [string]$AssetName     = "ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip",
+    [string]$FfmpegRelease  = "autobuild-2026-08-16-13-00",
+    [string]$AssetName      = "ffmpeg-n7.1.5-16-g9a4bb2c579-win64-lgpl-shared-7.1.zip",
+    # A different release/asset needs its own hash; pass an empty string to skip
+    # the check rather than have every override fail.
+    [string]$ExpectedSha256 = "a950596cea0bf9766f169dae6f1e6eb623aa1ccfd2822cd20cd2874b120d4086",
     [switch]$Force
 )
 
@@ -25,7 +32,7 @@ $cacheDir   = Join-Path $repoRoot ".cache/ffmpeg"
 $zipPath    = Join-Path $cacheDir $AssetName
 $extractDir = Join-Path $cacheDir ($AssetName -replace "\.zip$","")
 
-$downloadUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$AssetName"
+$downloadUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FfmpegRelease/$AssetName"
 
 # Required runtime DLLs only — header/license files don't ship.
 $requiredDlls = @(
@@ -41,11 +48,35 @@ $requiredDlls = @(
 New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $cacheDir  | Out-Null
 
+function Get-FfmpegArchive {
+    Write-Host "[fetch-ffmpeg] downloading $downloadUrl"
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+}
+
 if ((Test-Path $zipPath) -and -not $Force) {
     Write-Host "[fetch-ffmpeg] using cached $zipPath"
 } else {
-    Write-Host "[fetch-ffmpeg] downloading $downloadUrl"
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+    Get-FfmpegArchive
+}
+
+if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+    Write-Warning "[fetch-ffmpeg] ExpectedSha256 empty - skipping integrity check"
+} else {
+    $expected = $ExpectedSha256.Trim().ToUpperInvariant()
+    $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+    if ($actual -ne $expected) {
+        # A stale or half-written cache is the likely cause, so spend one retry
+        # on it before giving up.
+        Write-Warning "[fetch-ffmpeg] checksum mismatch on $zipPath - re-downloading"
+        Remove-Item -LiteralPath $zipPath -Force
+        Get-FfmpegArchive
+        $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+    }
+    if ($actual -ne $expected) {
+        Remove-Item -LiteralPath $zipPath -Force
+        throw "[fetch-ffmpeg] SHA-256 mismatch, refusing to unpack: expected $expected, got $actual"
+    }
+    Write-Host "[fetch-ffmpeg] sha256 ok"
 }
 
 if (Test-Path $extractDir) {

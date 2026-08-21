@@ -61,7 +61,12 @@ internal sealed class SshNetSession : ISshSession
             _presentedFingerprint = null;
 
             _ssh = new SshClient(BuildConnectionInfo(endpoint));
-            _scp = new ScpClient(BuildConnectionInfo(endpoint));
+            // ShellQuote, not the default: SCP is a remote shell command, so an
+            // unescaped path is command injection by a hostile camera. SSH.NET
+            // 2026.0.0 deprecates the transformation-less constructor for that
+            // reason. The cameras run busybox/dropbear, where POSIX shell
+            // quoting is the right escaping rule.
+            _scp = new ScpClient(BuildConnectionInfo(endpoint), RemotePathTransformation.ShellQuote);
             _ssh.HostKeyReceived += OnHostKeyReceived;
             _scp.HostKeyReceived += OnHostKeyReceived;
 
