@@ -6,11 +6,11 @@ review cycles short.
 
 ## Branches and PRs
 
-- Work on a feature branch off `main`. Branch names: `phase-NN-short-slug`
-  for phase-bound work, `fix-short-slug` or `feat-short-slug` otherwise.
+- Work on a feature branch off `main`. Branch names: `feat/short-slug` or
+  `fix/short-slug`.
 - Open the PR against `main`. Squash-merge is the default; the squash
   commit message should explain the *why*, not restate the diff.
-- Keep PRs small. One phase sub-step per PR (e.g. "Phase 9c: in-process
+- Keep PRs small — one self-contained step per PR (e.g. "in-process
   recording + foreground service on Android" is one PR; the touch-UX
   follow-up is another).
 
@@ -20,13 +20,17 @@ review cycles short.
   0 errors**. `TreatWarningsAsErrors=true` is enforced.
 - `dotnet test OpenIPC.Viewer.slnx --no-build` must pass; the MediaMTX
   integration test auto-skips when the container isn't running.
-- CI runs the matrix on every code push (docs-only pushes are skipped);
-  don't ignore red status.
+- The build also compiles the React web console (`npm ci` + `npm run build`
+  from `src/OpenIPC.Viewer.Web.Client`). Install Node if you touch the web UI;
+  without it the target is skipped and the server builds API-only.
+- CI runs the Windows / Linux / macOS matrix plus the Android and iOS heads
+  on every code push (docs-only pushes are skipped); don't ignore red status.
 
 ## Code style
 
-- Code, identifiers, log messages, commit messages: English.
-- Phase planning docs (`phase-NN-*.md`): Russian.
+- Code, identifiers, log messages, commit messages, docs: English.
+  (`docs/web-server.ru.md` is a translation of an English original; UI strings
+  live in `Localizer.cs` in both languages.)
 - One blank line between members; sealed `partial` classes when XAML
   code-behind or `CommunityToolkit.Mvvm` source-gen is involved.
 - Comments only where the *why* is non-obvious; well-named identifiers
@@ -40,9 +44,9 @@ review cycles short.
   `IHwDecoderFactory`) is wired per-platform in each head's
   `Composition.cs`. Shared registrations belong in
   `OpenIPC.Viewer.Composition.SharedComposition`.
-- Don't blur work from later phases into earlier ones — each
-  `phase-NN-*.md` has a **Не входит** section listing what's
-  deliberately out of scope.
+- Keep a change inside the scope it claims. Where the roadmap
+  ([docs/ROADMAP.md](../docs/ROADMAP.md)) puts something in a later phase,
+  leave it there rather than folding it in opportunistically.
 
 ## Reporting issues
 

@@ -2,15 +2,18 @@
 
 Three paths, listed cheapest-to-most-manual.
 
-## 1. WS-Discovery (LAN scan)
+## 1. Network discovery (LAN scan)
 
-Library → `🔍 Discover`. The app sends a WS-Discovery probe to the
-multicast group `239.255.255.250:3702`. Cameras with ONVIF responders
-answer within ~5 s; the dialog lists them with their advertised model and
-RTSP URI.
+Library → `Discover`. A scan runs two passive sources at once — ONVIF
+WS-Discovery (multicast `239.255.255.250:3702`) and mDNS — and merges the
+answers into one list, deduplicated per device, each entry tagged with what
+found it and how confident that is. Cameras with an ONVIF responder show up
+within ~5 s, with their advertised model and RTSP URI; OpenIPC devices
+without ONVIF are recognised by their web fingerprint.
 
 Pick a camera → enter credentials → the editor pre-fills name / host /
-RTSP / ONVIF profile. Save.
+RTSP / ONVIF profile. Save. The dialog stays open with the scan results, so
+several cameras can be added from one scan.
 
 ### Deep scan and where it sweeps
 
@@ -71,12 +74,25 @@ Library → `+ Add camera`. Fill in:
 
 ## 3. QR code
 
-*Comes in 11c.* Future: scan a QR with `rtsp://user:pass@host:port/path`
-or a JSON payload, app adds the camera in one tap.
+Library → `Scan QR` (also offered in the first-run welcome dialog). Pick a
+saved QR **image** — a screenshot, a photo, or the sticker sheet a camera
+shipped with — and the app decodes it and opens the camera editor pre-filled,
+so you review the fields before saving. Three payload shapes are understood:
+
+| Payload | Example |
+|---|---|
+| RTSP URL | `rtsp://admin:pass@192.168.1.50:554/0` |
+| JSON object | `{"name":"Gate","host":"192.168.1.50","rtsp":"rtsp://192.168.1.50/0","onvif":8000,"user":"admin","password":"…"}` |
+| App URI | `openipc-viewer://camera?host=192.168.1.50&rtsp=rtsp://192.168.1.50/0&user=admin` |
+
+Credentials found in the payload land in the editor's username / password
+fields and are stored in the keystore — they are never kept inside the saved
+RTSP URL. Scanning through the phone's camera (rather than picking an image)
+is not implemented yet.
 
 ## Common issues
 
-- **"Failed to connect" / `stimeout` errors** — wrong RTSP path. Camera
+- **"Failed to connect" / connection timeouts** — wrong RTSP path. Camera
   vendors love to pick different defaults (`/cam/realmonitor`, `/stream1`,
   `/h264`). Check the vendor docs.
 - **Auth loops** — the URI takes plain user/password but credentials live

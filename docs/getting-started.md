@@ -18,14 +18,19 @@ Per-platform AppData root paths are in the README's **User data** section.
 
 ## First-run flow
 
-On first launch the library is empty and a welcome dialog appears with three
-choices:
+On first launch the library is empty and a welcome dialog appears — it also
+carries a language picker (English / Russian, switchable later in Settings) —
+with four choices:
 
-1. **Scan local network** — runs WS-Discovery against your subnet (Phase 4).
-   Most cameras with a working ONVIF responder are picked up within ~5 s.
-2. **Add manually** — host + RTSP path form. Use this if discovery misses the
+1. **Scan local network** — aggregated discovery: ONVIF WS-Discovery and mDNS
+   run together, with an optional *Deep scan* subnet sweep for cameras that
+   announce nothing. Most cameras with a working ONVIF responder are picked up
+   within ~5 s. See [Adding your first camera](first-camera.md).
+2. **Scan QR code** — pick a saved QR image (screenshot, photo, sticker) and
+   the camera editor opens pre-filled from it.
+3. **Add manually** — host + RTSP path form. Use this if discovery misses the
    camera or if it's on a different VLAN.
-3. **Skip** — opens an empty library; add cameras later from `+ Add camera`.
+4. **Skip** — opens an empty library; add cameras later from `+ Add camera`.
 
 The "show this once" flag is persisted; dismissing it once means the dialog
 doesn't reappear even if you later delete every camera.
@@ -40,3 +45,18 @@ doesn't reappear even if you later delete every camera.
 - **Settings → Advanced → Verbose logging** — flips Serilog's minimum level
   to Debug live, no restart needed. Useful when something doesn't connect
   and you want to see why before pinging an issue.
+
+## Moving to another machine
+
+*Settings → Backup → Export config* writes cameras and layouts to a single
+JSON; *Import* reads it back on the other machine, showing a preview of how many
+cameras and layouts will be added or updated before it commits. Passwords stay
+out of the file unless you tick *include credentials* and set a passphrase in
+the config-sync section — then they travel encrypted with it.
+
+## Running it as a server
+
+The same binary can serve a browser UI to the rest of your network instead of
+opening a window (`--server-only`). Flags, accounts and reverse-proxy examples
+are in the self-hosting guide ([English](web-server.md) ·
+[Русский](web-server.ru.md)).

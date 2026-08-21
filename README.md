@@ -138,6 +138,12 @@ dotnet run --project src/OpenIPC.Viewer.Desktop
 ```
 
 Build runs with `TreatWarningsAsErrors=true`; any warning fails the build.
+The web console's React SPA is built by the same `dotnet build` (`npm ci` +
+`npm run build`, then embedded into `OpenIPC.Viewer.Web.dll`), so Node is a
+prerequisite if you want the browser UI (CI builds it with Node 22). Without
+Node the build still succeeds and the server runs API-only; pass
+`-p:BuildWebClient=false` to skip it deliberately.
+
 Run the FFmpeg fetch script for your OS once — it downloads the bundled
 shared-build (`n7.1` ABI) from `BtbN/FFmpeg-Builds` into `runtimes/<rid>/native/`:
 `tools/fetch-ffmpeg.ps1` (Windows → `win-x64`) or `tools/fetch-ffmpeg-linux.sh`
@@ -180,12 +186,18 @@ src/
   OpenIPC.Viewer.Devices/         net9.0         — ONVIF, Majestic HTTP, SSH, discovery sources
   OpenIPC.Viewer.App/             net9.0         — Avalonia views and viewmodels (cross-platform)
   OpenIPC.Viewer.Composition/     net9.0         — shared DI registrations (used by every head)
+  OpenIPC.Viewer.Web/             net9.0         — Kestrel host + REST API for the self-hosted console
+  OpenIPC.Viewer.Web.Client/      —              — React + Vite SPA, built and embedded into the Web dll
   OpenIPC.Viewer.Desktop/         net9.0         — Win/Lin/Mac host, classic-window lifetime
   OpenIPC.Viewer.Android/         net10.0-android — Android host (min API 31), foreground-service recording
   OpenIPC.Viewer.iOS/             net10.0-ios     — iOS host (min 16), foreground-only recording
 tests/
-  OpenIPC.Viewer.Core.Tests/      xUnit
-  OpenIPC.Viewer.Video.Tests/     xUnit + MediaMTX integration
+  OpenIPC.Viewer.Core.Tests/           xUnit
+  OpenIPC.Viewer.Devices.Tests/        xUnit — ONVIF, Majestic, discovery
+  OpenIPC.Viewer.Infrastructure.Tests/ xUnit — SQLite, migrations, secrets
+  OpenIPC.Viewer.Analytics.Tests/      xUnit — detection pre/post-processing
+  OpenIPC.Viewer.Web.Tests/            xUnit — API, auth, permissions
+  OpenIPC.Viewer.Video.Tests/          xUnit + MediaMTX integration
 ```
 
 `App` references `Core` only. Infrastructure, Video, Devices and the platform
