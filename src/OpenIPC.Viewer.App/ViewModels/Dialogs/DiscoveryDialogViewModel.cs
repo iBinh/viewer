@@ -31,6 +31,10 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
     private CancellationTokenSource? _scanCts;
     // Cancels in-flight Majestic fingerprints when the dialog goes away.
     private readonly CancellationTokenSource _lifetimeCts = new();
+    // What the sweep will actually walk: the ticked subnets folded together with
+    // anything typed. Null means "no sweep", which is what an untouched dialog
+    // wants — passive sources only.
+    private IpRange? _effectiveRange;
     private readonly Dictionary<string, DiscoveredDeviceRowVm> _rowsByHost =
         new(StringComparer.OrdinalIgnoreCase);
     // Hosts we already fingerprinted (or are fingerprinting) — one ping per host.
@@ -38,6 +42,14 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
     private readonly SemaphoreSlim _fingerprintGate = new(6);
 
     public ObservableCollection<DiscoveredDeviceRowVm> Cameras { get; } = new();
+
+    // Subnets the OS says are reachable, ticked by default — the point is that
+    // Deep scan needs no typing to reach a camera on another VLAN or behind a
+    // VPN. Empty on a platform with no route reader and no usable interfaces,
+    // in which case the dialog shows only the manual box.
+    public ObservableCollection<ScanTargetRowVm> ScanTargets { get; } = new();
+
+    public bool HasScanTargets => ScanTargets.Count > 0;
 
     [ObservableProperty] private string _statusText = Localizer.Instance["Discovery.Status.Initial"];
 
@@ -63,6 +75,22 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
     // nor mDNS, at the cost of knocking on every host. Off by default.
     [ObservableProperty] private bool _deepScan;
 
+    // Extra hand-typed range on top of the ticked subnets — for a subnet with no
+    // route of its own, or a single address. Typing one turns the sweep on by
+    // itself, so it still works with Deep scan off.
+    [ObservableProperty] private string _ipRangeText = "";
+
+    // Null while everything ticked and typed adds up to something sweepable; a
+    // localized complaint otherwise. Disables Scan, so neither a typo nor an
+    // over-wide selection can quietly degrade into the wrong sweep.
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
+    private string? _ipRangeError;
+
+    // "will knock on N addresses" — shown before the user commits, because the
+    // ticked subnets were chosen for them and the total should not surprise.
+    [ObservableProperty] private string _sweepSummary = "";
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
     [NotifyPropertyChangedFor(nameof(CanAdd))]
@@ -79,6 +107,7 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
         IDiscoveryAggregator aggregator,
         OnvifProbeService probe,
         OpenIPC.Viewer.Core.Majestic.IMajesticClient majestic,
+        IScanTargetProvider scanTargets,
         DiscoverySessionCache cache,
         IReadOnlySet<string> knownHosts,
         ILogger<DiscoveryDialogViewModel> logger)
@@ -101,6 +130,24 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
             _password = cache.Password;
         }
         _deepScan = cache.DeepScan;
+        _ipRangeText = cache.IpRangeText;
+
+        // Local subnets ticked, routed ones (behind a VPN / another VLAN) not:
+        // sweeping the LAN this machine is on is the feature, but sweeping the
+        // far side of a tunnel someone happens to be on shouldn't happen without
+        // a deliberate tick. A choice the user already made this session wins
+        // over the default.
+        foreach (var target in SafeTargets(scanTargets))
+        {
+            var selected = cache.TargetSelections.TryGetValue(target.Cidr, out var choice)
+                ? choice
+                : target.Origin == ScanTargetOrigin.LocalSubnet;
+            ScanTargets.Add(new ScanTargetRowVm(target, selected, OnTargetToggled));
+        }
+
+        // Field init skips the generated On*Changed hooks, so the rehydrated
+        // state has to be folded in by hand or the first Scan would ignore it.
+        RecomputeRange();
         foreach (var device in cache.Snapshot())
             Upsert(device);
         if (Cameras.Count > 0)
@@ -109,8 +156,95 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
 
     partial void OnUsernameChanged(string value) => _cache.Username = value;
     partial void OnPasswordChanged(string value) => _cache.Password = value;
-    partial void OnDeepScanChanged(bool value) => _cache.DeepScan = value;
+    partial void OnDeepScanChanged(bool value)
+    {
+        _cache.DeepScan = value;
+        // Deep scan is the gate, the tick list is the destination — flipping the
+        // gate changes what gets swept, so the total has to be recomputed.
+        RecomputeRange();
+    }
     partial void OnReuseCredentialsChanged(bool value) => _cache.ReuseCredentials = value;
+
+    partial void OnIpRangeTextChanged(string value)
+    {
+        _cache.IpRangeText = value;
+        RecomputeRange();
+    }
+
+    private void OnTargetToggled(ScanTargetRowVm row)
+    {
+        _cache.TargetSelections[row.Target.Cidr] = row.IsSelected;
+        RecomputeRange();
+    }
+
+    // Folds the ticked subnets and the typed range into the single range the
+    // sweep walks, and reports what that adds up to. Runs per keystroke and per
+    // tick, so it stays pure arithmetic and never touches the network.
+    private void RecomputeRange()
+    {
+        IpRange? typed = null;
+        if (!string.IsNullOrWhiteSpace(IpRangeText)
+            && !IpRange.TryParse(IpRangeText, out typed, out var typedError))
+        {
+            Reject(typedError);
+            return;
+        }
+
+        var parts = new List<IpRange>();
+        if (typed is not null)
+            parts.Add(typed);
+        // Deep scan decides WHETHER to sweep, the tick list decides WHERE. An
+        // untouched dialog therefore stays passive-only, exactly as before.
+        if (DeepScan)
+            parts.AddRange(ScanTargets.Where(t => t.IsSelected).Select(t => t.Target.Range));
+
+        if (parts.Count == 0)
+        {
+            _effectiveRange = null;
+            // With no targets to offer, Deep scan still sweeps the subnet the
+            // source works out for itself — say so, rather than leaving the line
+            // blank and letting a 254-host sweep come as a surprise.
+            SweepSummary = DeepScan && ScanTargets.Count == 0
+                ? Localizer.Instance["Discovery.Sweep.SummaryLocal"]
+                : "";
+            IpRangeError = null;
+            return;
+        }
+
+        if (!IpRange.TryCombine(parts, out var combined, out var combineError))
+        {
+            Reject(combineError);
+            return;
+        }
+
+        _effectiveRange = combined;
+        SweepSummary = string.Format(Localizer.Instance["Discovery.Sweep.SummaryFormat"], combined.Count);
+        IpRangeError = null;
+    }
+
+    private void Reject(IpRangeParseError error)
+    {
+        _effectiveRange = null;
+        SweepSummary = "";
+        IpRangeError = error == IpRangeParseError.TooLarge
+            ? string.Format(Localizer.Instance["Discovery.IpRange.TooLargeFormat"], IpRange.MaxHosts)
+            : Localizer.Instance["Discovery.IpRange.Invalid"];
+    }
+
+    // A provider that trips over an exotic adapter must not stop the dialog from
+    // opening — the manual box still works with no targets at all.
+    private IReadOnlyList<ScanTarget> SafeTargets(IScanTargetProvider provider)
+    {
+        try
+        {
+            return provider.GetTargets();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Enumerating scan targets failed");
+            return Array.Empty<ScanTarget>();
+        }
+    }
 
     [RelayCommand(CanExecute = nameof(CanScan))]
     private async Task ScanAsync()
@@ -121,7 +255,9 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
         _cache.Clear();
         Selected = null;
         ScanProgress = 0;
-        StatusText = Localizer.Instance["Discovery.Status.Scanning"];
+        StatusText = _effectiveRange is { } sweep
+            ? string.Format(Localizer.Instance["Discovery.Status.ScanningRangeFormat"], sweep, sweep.Count)
+            : Localizer.Instance["Discovery.Status.Scanning"];
         ScanInProgress = true;
 
         _scanCts?.Cancel();
@@ -130,7 +266,14 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
 
         try
         {
-            var options = new DiscoveryOptions(TimeSpan.FromSeconds(6), DeepScan);
+            // Unticking every target means "don't sweep", and has to be passed
+            // as such: the sweep source enables on DeepScan alone and would fall
+            // back to deriving the local /24, running a 254-host sweep the
+            // dialog just told the user it would not run. When no targets were
+            // offered at all there is nothing to untick, so Deep scan keeps its
+            // original meaning of "sweep whatever subnet you can work out".
+            var doSweep = DeepScan && (_effectiveRange is not null || ScanTargets.Count == 0);
+            var options = new DiscoveryOptions(TimeSpan.FromSeconds(6), doSweep, _effectiveRange);
             var progress = new Progress<double>(p => ScanProgress = p);
 
             await foreach (var device in _aggregator.ScanAsync(options, progress, ct).ConfigureAwait(true))
@@ -225,7 +368,7 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
         }, ct);
     }
 
-    private bool CanScan() => !ScanInProgress && !AddInProgress;
+    private bool CanScan() => !ScanInProgress && !AddInProgress && IpRangeError is null;
 
     public async Task<DiscoveryDialogResult?> AddSelectedAsync()
     {
@@ -295,6 +438,40 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
         _scanCts?.Cancel();
         _lifetimeCts.Cancel();
     }
+}
+
+// One auto-detected subnet in the tick list. The callback (rather than the VM
+// watching the collection) keeps the "remember what I unticked" bookkeeping in
+// one place and avoids a CollectionChanged subscription per row.
+public sealed partial class ScanTargetRowVm : ViewModelBase
+{
+    private readonly Action<ScanTargetRowVm> _onToggled;
+
+    public ScanTargetRowVm(ScanTarget target, bool isSelected, Action<ScanTargetRowVm> onToggled)
+    {
+        Target = target;
+        _isSelected = isSelected;
+        _onToggled = onToggled;
+    }
+
+    public ScanTarget Target { get; }
+
+    [ObservableProperty] private bool _isSelected;
+
+    partial void OnIsSelectedChanged(bool value) => _onToggled(this);
+
+    public string Cidr => Target.Cidr;
+
+    // e.g. "Ethernet 2 · this machine's network · 254 addresses" — the origin is
+    // the part worth reading: a routed subnet is one passive discovery can never
+    // see, which is exactly why it is offered here.
+    public string Detail => string.Format(
+        Localizer.Instance["Discovery.Target.DetailFormat"],
+        Target.InterfaceName,
+        Localizer.Instance[Target.Origin == ScanTargetOrigin.LocalSubnet
+            ? "Discovery.Target.Local"
+            : "Discovery.Target.Routed"],
+        Target.Range.Count);
 }
 
 public sealed partial class DiscoveredDeviceRowVm : ViewModelBase

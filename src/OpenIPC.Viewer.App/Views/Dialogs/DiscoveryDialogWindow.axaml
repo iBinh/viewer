@@ -6,7 +6,7 @@
         x:Class="OpenIPC.Viewer.App.Views.Dialogs.DiscoveryDialogWindow"
         x:DataType="vm:DiscoveryDialogViewModel"
         Title="{Binding [Discovery.Title], Source={x:Static svc:Localizer.Instance}}"
-        Width="560" Height="620"
+        Width="560" Height="660"
         WindowStartupLocation="CenterOwner"
         CanResize="False"
         Background="{StaticResource Bg1Brush}">

@@ -12,6 +12,7 @@ public sealed class DiscoveryDialogFactory
     private readonly IDiscoveryAggregator _aggregator;
     private readonly OnvifProbeService _probe;
     private readonly IMajesticClient _majestic;
+    private readonly IScanTargetProvider _scanTargets;
     private readonly DiscoverySessionCache _cache;
     private readonly ILoggerFactory _loggerFactory;
 
@@ -19,12 +20,14 @@ public sealed class DiscoveryDialogFactory
         IDiscoveryAggregator aggregator,
         OnvifProbeService probe,
         IMajesticClient majestic,
+        IScanTargetProvider scanTargets,
         DiscoverySessionCache cache,
         ILoggerFactory loggerFactory)
     {
         _aggregator = aggregator;
         _probe = probe;
         _majestic = majestic;
+        _scanTargets = scanTargets;
         _cache = cache;
         _loggerFactory = loggerFactory;
     }
@@ -32,6 +35,6 @@ public sealed class DiscoveryDialogFactory
     // knownHosts: hosts of cameras already in the library, so rows can carry
     // an "already added" badge during the multi-add loop.
     public DiscoveryDialogViewModel Create(IReadOnlySet<string> knownHosts) =>
-        new(_aggregator, _probe, _majestic, _cache, knownHosts,
+        new(_aggregator, _probe, _majestic, _scanTargets, _cache, knownHosts,
             _loggerFactory.CreateLogger<DiscoveryDialogViewModel>());
 }

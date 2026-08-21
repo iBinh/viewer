@@ -82,8 +82,15 @@ Four ways, all landing in the same database:
 * **Find them on the network** — *Discovery → Scan*. Passive sources (ONVIF
   WS-Discovery, mDNS) always run; *Deep scan* additionally sweeps the local
   subnet, which finds cameras that announce nothing but looks like a port scan
-  to anyone watching the network. Pick a device, enter its login, *Probe* to read
-  the real RTSP URL and capabilities off the camera, then *Add*.
+  to anyone watching the network. Leave *IP range* blank to sweep the server's
+  own subnet, or type one — `192.168.1.0/24`, `192.168.1.10-200`, a single
+  address, or several separated by commas — to sweep a subnet the server isn't
+  on; a filled-in range turns the sweep on by itself and is capped at 4096
+  addresses. The range must stay inside a private network (`10/8`,
+  `172.16/12`, `192.168/16`): the server, not your own machine, does the
+  sweeping, so it won't be pointed at the public internet or at its own
+  loopback. Pick a device, enter its login, *Probe* to read the real RTSP URL
+  and capabilities off the camera, then *Add*.
 * **In the web UI** — *Cameras → ＋ Add camera*.
 * **Import a backup** — *System → Import* a JSON file exported from the desktop app
   or another instance (*System → Export config* produces one; camera passwords are

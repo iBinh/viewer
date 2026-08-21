@@ -145,6 +145,11 @@ export const EN: Dict = {
   'Discovery.DeepScan': 'Deep scan',
   'Discovery.DeepScanNote':
     'Passive sources (ONVIF, mDNS) always run. Deep scan also sweeps the local subnet — it finds cameras that announce nothing, but looks like a port scan on the network.',
+  'Discovery.IpRange': 'IP range',
+  'Discovery.IpRangePlaceholder': '192.168.1.0/24 (optional)',
+  'Discovery.IpRangeNote':
+    'Leave the range blank to sweep the server’s own subnet. Fill it in — 192.168.1.0/24, 192.168.1.10-200, a single address, or several separated by commas — to sweep somewhere else; that also switches the sweep on by itself.',
+  'Discovery.IpRangeInvalid': 'That IP range is not valid.',
   'Discovery.Scanning': 'Scanning…',
   'Discovery.Found': 'Found:',
   'Discovery.Nothing': 'Nothing answered. Try a deep scan, or add the camera by hand.',
@@ -412,6 +417,11 @@ export const RU: Dict = {
   'Discovery.DeepScan': 'Глубокий скан',
   'Discovery.DeepScanNote':
     'Пассивные источники (ONVIF, mDNS) работают всегда. Глубокий скан дополнительно обходит подсеть — найдёт камеры, которые о себе не заявляют, но со стороны выглядит как сканирование портов.',
+  'Discovery.IpRange': 'Диапазон IP',
+  'Discovery.IpRangePlaceholder': '192.168.1.0/24 (необязательно)',
+  'Discovery.IpRangeNote':
+    'Пустое поле — обходится подсеть самого сервера. Укажите диапазон — 192.168.1.0/24, 192.168.1.10-200, один адрес или несколько через запятую — чтобы обойти другую сеть; это само по себе включает обход.',
+  'Discovery.IpRangeInvalid': 'Неверный диапазон IP.',
   'Discovery.Scanning': 'Идёт поиск…',
   'Discovery.Found': 'Найдено:',
   'Discovery.Nothing': 'Никто не ответил. Попробуйте глубокий скан или добавьте камеру вручную.',

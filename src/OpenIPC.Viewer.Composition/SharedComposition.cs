@@ -101,6 +101,33 @@ public static class SharedComposition
         services.AddSingleton<OpenIPC.Viewer.Core.Discovery.IDiscoverySource, OpenIPC.Viewer.Devices.Discovery.MdnsDiscoverySource>();
         // Opt-in active /24 sweep (Slice C) — finds non-ONVIF/non-mDNS OpenIPC.
         services.AddSingleton<OpenIPC.Viewer.Core.Discovery.IDiscoverySource, OpenIPC.Viewer.Devices.Discovery.SubnetSweepDiscoverySource>();
+        // Cheap unauthenticated ONVIF check by address, so the sweep can flag
+        // ONVIF on cameras multicast WS-Discovery can never reach (routed subnet).
+        services.AddSingleton<OpenIPC.Viewer.Core.Onvif.IOnvifFingerprint,
+            OpenIPC.Viewer.Devices.Onvif.OnvifHttpFingerprint>();
+        // Which subnets to offer for sweeping, read off the OS routing table so
+        // a camera on another VLAN / behind a VPN needs no typing. No managed
+        // API for routes, so it is per-platform; unsupported ones get null and
+        // ScanTargetProvider falls back to a /24 per local interface.
+        if (System.OperatingSystem.IsWindows())
+        {
+            services.AddSingleton<OpenIPC.Viewer.Devices.Discovery.Routes.IRouteTableReader,
+                OpenIPC.Viewer.Devices.Discovery.Routes.WindowsRouteTableReader>();
+        }
+        else if (System.OperatingSystem.IsLinux() && !System.OperatingSystem.IsAndroid())
+        {
+            services.AddSingleton<OpenIPC.Viewer.Devices.Discovery.Routes.IRouteTableReader,
+                OpenIPC.Viewer.Devices.Discovery.Routes.LinuxRouteTableReader>();
+        }
+
+        // GetService, not GetRequiredService: on a platform with no reader the
+        // provider is expected to run on the interface-subnet fallback alone.
+        services.AddSingleton<OpenIPC.Viewer.Core.Discovery.IScanTargetProvider>(sp =>
+            new OpenIPC.Viewer.Devices.Discovery.ScanTargetProvider(
+                sp.GetService<OpenIPC.Viewer.Devices.Discovery.Routes.IRouteTableReader>(),
+                sp.GetRequiredService<INetworkInterfaceProvider>(),
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<
+                    OpenIPC.Viewer.Devices.Discovery.ScanTargetProvider>>()));
         services.AddSingleton<OpenIPC.Viewer.Core.Discovery.IDiscoveryAggregator, OpenIPC.Viewer.Devices.Discovery.DiscoveryAggregator>();
         services.AddSingleton<OpenIPC.Viewer.Core.Onvif.Discovery.INetworkInterfaceProvider,
             OpenIPC.Viewer.Devices.Onvif.Discovery.SystemNetworkInterfaceProvider>();

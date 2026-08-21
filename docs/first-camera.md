@@ -12,10 +12,50 @@ RTSP URI.
 Pick a camera → enter credentials → the editor pre-fills name / host /
 RTSP / ONVIF profile. Save.
 
+### Deep scan and where it sweeps
+
+WS-Discovery and mDNS are multicast, so they only ever reach the local
+link. *Deep scan* adds an active sweep — a TCP knock on each host — which
+is how a camera that answers neither, or sits on a subnet multicast can't
+cross, gets found.
+
+The dialog lists the subnets it can sweep, read from the machine's routing
+table:
+
+- Subnets **this machine is on** are ticked by default.
+- Subnets reachable only **through a route** (another VLAN, or a VPN /
+  mesh tunnel) are listed but left unticked — tick the ones you mean to
+  sweep. This is the case that needs no typing: the camera's subnet shows
+  up on its own, you just tick it.
+
+The **IP range** box below the list is for anything the routing table
+doesn't show — a subnet with no route of its own, or a single address. What
+you type is **combined with** the ticked subnets, not used instead of them.
+Accepted:
+
+| Typed                         | Sweeps                        |
+|-------------------------------|-------------------------------|
+| `192.168.1.0/24`              | `192.168.1.1` … `192.168.1.254` |
+| `192.168.1.10-192.168.1.200`  | that span                     |
+| `192.168.1.10-200`            | the same, last octet only     |
+| `192.168.1.64`                | one host                      |
+
+Several at once, separated by commas or spaces. Typing a range also
+switches the sweep on by itself. The running total is shown before you
+scan; at most 4096 addresses per scan, so if the ticked subnets plus the
+typed range exceed that, untick one or narrow the range.
+
+On the [web console](web-server.md) the typed range must stay inside a
+private network (`10/8`, `172.16/12`, `192.168/16`) — a server accepts a
+range from any Manage user, so it isn't allowed to be aimed at the wider
+internet or at its own loopback.
+
 If discovery turns up nothing:
 - Your router is blocking multicast (check WiFi AP settings — some block
   it on guest networks by default).
-- The camera is on a different VLAN.
+- The camera is on a different VLAN — tick that subnet in the Deep scan
+  list (or type its range), then scan again. It has to be routable from
+  here; discovery can't cross a firewall that drops the traffic.
 - ONVIF is disabled in the camera config (Majestic ships with it disabled
   in some firmware revisions — flip `service.onvif.enabled = true`).
 

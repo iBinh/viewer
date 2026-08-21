@@ -236,7 +236,11 @@ export const api = {
 
   // Discovery. A scan is a background job on the server: start it, then poll by
   // id until status leaves 'running' (results accumulate as sources report).
-  startScan: (deepScan: boolean) => req<ScanDto>('POST', '/api/v1/discovery/scan', { deepScan }),
+  // ipRange: blank sweeps the server's own subnet, anything else sweeps exactly
+  // that (CIDR, first-last, or a single address) — the only way to reach cameras
+  // the server doesn't share a subnet with.
+  startScan: (deepScan: boolean, ipRange?: string) =>
+    req<ScanDto>('POST', '/api/v1/discovery/scan', { deepScan, ipRange: ipRange || undefined }),
   getScan: (id: string) => req<ScanDto>('GET', `/api/v1/discovery/scan/${id}`),
   cancelScan: (id: string) => req<void>('DELETE', `/api/v1/discovery/scan/${id}`),
   probeDevice: (body: { host: string; onvifPort?: number | null; username?: string; password?: string }) =>
