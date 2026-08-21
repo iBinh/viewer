@@ -15,13 +15,23 @@
 # contained, exactly like fetch-ffmpeg.ps1 does for win-x64.
 #
 # Source:  BtbN/FFmpeg-Builds GitHub releases (https://github.com/BtbN/FFmpeg-Builds).
-# Pin:     n7.1 (matches FFmpeg.AutoGen 7.1.x bindings).
+# Pin:     n7.1 (matches FFmpeg.AutoGen 7.1.x bindings), from a dated release
+#          rather than the rolling `latest` tag. `latest` is rebuilt daily and
+#          only keeps the branches BtbN currently builds: n7.1 was dropped from
+#          it in August 2026 (only master / n8.1 / n9.0 remain), which 404'd this
+#          script and took CI down with it. A dated tag keeps its assets, and the
+#          SHA-256 below makes a silently swapped or truncated archive fail here
+#          instead of at runtime.
 # Flavor:  lgpl-shared (no GPL components; redistributable alongside the app as
 #          long as the .so remain shared + replaceable — see README "Licensing").
 set -euo pipefail
 
-FFMPEG_VERSION="${FFMPEG_VERSION:-n7.1}"
-ASSET_NAME="${ASSET_NAME:-ffmpeg-${FFMPEG_VERSION}-latest-linux64-lgpl-shared-7.1.tar.xz}"
+# Overridable together: a different release/asset needs its own checksum, and
+# an empty EXPECTED_SHA256 skips the check (with a warning) rather than failing
+# every override.
+FFMPEG_RELEASE="${FFMPEG_RELEASE:-autobuild-2026-08-16-13-00}"
+ASSET_NAME="${ASSET_NAME:-ffmpeg-n7.1.5-16-g9a4bb2c579-linux64-lgpl-shared-7.1.tar.xz}"
+EXPECTED_SHA256="${EXPECTED_SHA256-05e4cf57a4f8bb63bda8a1a306dbf370c03e305088e7153c02e7761b2c181ec0}"
 FORCE="${FORCE:-0}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,15 +40,49 @@ cache_dir="$repo_root/.cache/ffmpeg"
 archive_path="$cache_dir/$ASSET_NAME"
 extract_dir="$cache_dir/${ASSET_NAME%.tar.xz}"
 
-download_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$ASSET_NAME"
+download_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$ASSET_NAME"
 
 mkdir -p "$native_dir" "$cache_dir"
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+download() {
+  echo "[fetch-ffmpeg-linux] downloading $download_url"
+  curl -fL --retry 3 -o "$archive_path" "$download_url"
+}
 
 if [[ -f "$archive_path" && "$FORCE" != "1" ]]; then
   echo "[fetch-ffmpeg-linux] using cached $archive_path"
 else
-  echo "[fetch-ffmpeg-linux] downloading $download_url"
-  curl -fL --retry 3 -o "$archive_path" "$download_url"
+  download
+fi
+
+if [[ -z "$EXPECTED_SHA256" ]]; then
+  echo "[fetch-ffmpeg-linux] EXPECTED_SHA256 empty — skipping integrity check" >&2
+else
+  actual="$(sha256_of "$archive_path")"
+  if [[ "$actual" != "$EXPECTED_SHA256" ]]; then
+    # A stale or half-written cache is the likely cause, so spend one retry on
+    # it before giving up.
+    echo "[fetch-ffmpeg-linux] checksum mismatch on $archive_path — re-downloading" >&2
+    rm -f "$archive_path"
+    download
+    actual="$(sha256_of "$archive_path")"
+  fi
+  if [[ "$actual" != "$EXPECTED_SHA256" ]]; then
+    echo "[fetch-ffmpeg-linux] SHA-256 mismatch, refusing to unpack:" >&2
+    echo "  expected $EXPECTED_SHA256" >&2
+    echo "  got      $actual" >&2
+    rm -f "$archive_path"
+    exit 1
+  fi
+  echo "[fetch-ffmpeg-linux] sha256 ok"
 fi
 
 rm -rf "$extract_dir"
