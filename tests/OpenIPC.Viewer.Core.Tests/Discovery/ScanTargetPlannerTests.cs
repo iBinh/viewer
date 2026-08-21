@@ -53,8 +53,10 @@ public sealed class ScanTargetPlannerTests
     [Fact]
     public void LocalSubnetsComeFirst()
     {
-        // Reversed input, so ordering can't pass by accident.
-        var targets = ScanTargetPlanner.Plan(RealWorldTable().Reverse(), ["192.168.1.160"]);
+        // Reversed input, so ordering can't pass by accident. Enumerable.Reverse,
+        // not the array's — on .NET 9 `RouteEntry[].Reverse()` binds to
+        // MemoryExtensions.Reverse(Span<T>), which reverses in place and returns void.
+        var targets = ScanTargetPlanner.Plan(Enumerable.Reverse(RealWorldTable()), ["192.168.1.160"]);
 
         Assert.Equal(ScanTargetOrigin.LocalSubnet, targets[0].Origin);
     }
@@ -127,5 +129,40 @@ public sealed class ScanTargetPlannerTests
     public void NoRoutes_YieldsNoTargets()
     {
         Assert.Empty(ScanTargetPlanner.Plan([], ["192.168.1.160"]));
+    }
+
+    // IsPrivateIpv4 is also the gate the web scan endpoint puts a typed ipRange
+    // through, so the SSRF-relevant addresses are pinned directly.
+    [Theory]
+    [InlineData("127.0.0.1", false)]        // the server's own loopback services
+    [InlineData("169.254.169.254", false)]  // cloud instance metadata
+    [InlineData("0.0.0.0", false)]
+    [InlineData("8.8.8.8", false)]          // arbitrary public host
+    [InlineData("100.64.0.1", false)]       // CGNAT
+    [InlineData("192.167.255.255", false)]  // one below 192.168/16
+    [InlineData("192.169.0.0", false)]      // one above it
+    [InlineData("10.0.0.1", true)]
+    [InlineData("172.16.0.1", true)]
+    [InlineData("172.31.255.255", true)]
+    [InlineData("192.168.3.137", true)]
+    public void IsPrivateIpv4_ClassifiesTheSsrfBoundary(string address, bool expected)
+    {
+        Assert.Equal(expected, ScanTargetPlanner.IsPrivateIpv4(address));
+    }
+
+    // The exact composition the web endpoint uses to reject a range that would
+    // let a Manage user aim the server's sweep off the LAN: every enumerated
+    // host must be private, so a single public address in the range fails it.
+    [Theory]
+    [InlineData("192.168.1.0/24", true)]
+    [InlineData("10.0.0.10-10.0.0.20", true)]
+    [InlineData("127.0.0.1", false)]
+    [InlineData("169.254.169.254", false)]
+    [InlineData("192.168.1.250-192.168.2.5", true)]   // crosses a /24 but stays private
+    [InlineData("192.167.255.250-192.168.0.5", false)] // starts one subnet below private space
+    public void WebRangeGate_AcceptsOnlyFullyPrivateRanges(string text, bool expected)
+    {
+        Assert.True(IpRange.TryParse(text, out var range, out _));
+        Assert.Equal(expected, range.EnumerateHosts().All(ScanTargetPlanner.IsPrivateIpv4));
     }
 }

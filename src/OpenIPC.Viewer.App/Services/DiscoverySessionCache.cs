@@ -24,10 +24,13 @@ public sealed class DiscoverySessionCache
     // Empty = sweep the auto-detected local /24.
     public string IpRangeText { get; set; } = "";
 
-    // CIDRs of auto-detected subnets the user unticked. Stored as the exclusion
-    // rather than the selection so a subnet that appears later (a VPN brought up
-    // mid-session) arrives ticked, like every other one.
-    public HashSet<string> DeselectedTargets { get; } = new(StringComparer.Ordinal);
+    // Explicit tick choices the user made for auto-detected subnets, by CIDR.
+    // Only choices that override the per-origin default are meaningful; a CIDR
+    // with no entry falls back to that default (local subnets ticked, routed
+    // ones — behind a VPN or on another VLAN — not). So a subnet that appears
+    // later in the session (a VPN brought up mid-session) still arrives at its
+    // safe default rather than inheriting a stale tick.
+    public Dictionary<string, bool> TargetSelections { get; } = new(StringComparer.Ordinal);
 
     // "Use these credentials for all cameras" — on (default) carries the typed
     // login into the next add; off makes every camera start with blank fields

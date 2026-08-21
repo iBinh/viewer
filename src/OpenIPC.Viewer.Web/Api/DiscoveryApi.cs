@@ -54,12 +54,24 @@ public static class DiscoveryApi
             // ignored: silently sweeping the wrong subnet reads as "no cameras".
             IpRange? range = null;
             var rangeText = body?.IpRange;
-            if (!string.IsNullOrWhiteSpace(rangeText)
-                && !IpRange.TryParse(rangeText, out range, out var rangeError))
+            if (!string.IsNullOrWhiteSpace(rangeText))
             {
-                return ValidationError(rangeError == IpRangeParseError.TooLarge
-                    ? $"ipRange covers more than {IpRange.MaxHosts} addresses"
-                    : "ipRange must be like 192.168.1.0/24, 192.168.1.10-200, or a single address");
+                if (!IpRange.TryParse(rangeText, out range, out var rangeError))
+                {
+                    return ValidationError(rangeError == IpRangeParseError.TooLarge
+                        ? $"ipRange covers more than {IpRange.MaxHosts} addresses"
+                        : "ipRange must be like 192.168.1.0/24, 192.168.1.10-200, or a single address");
+                }
+
+                // Unlike the desktop, where a local user sweeps their own LAN,
+                // the web range is attacker-controllable: a Manage user could
+                // point the server at 127.0.0.1 (its own services) or
+                // 169.254.169.254 (cloud metadata) and read "which ports
+                // answered" out of the results. The auto-detected desktop
+                // targets go through IsPrivateIpv4 already; the typed web range
+                // must too. Private-only, no exceptions on this path.
+                if (!range.EnumerateHosts().All(ScanTargetPlanner.IsPrivateIpv4))
+                    return ValidationError("ipRange must stay within a private network (10/8, 172.16/12, 192.168/16)");
             }
 
             var scan = store.Start(new DiscoveryOptions(timeout, deep, range));

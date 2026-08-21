@@ -132,13 +132,17 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
         _deepScan = cache.DeepScan;
         _ipRangeText = cache.IpRangeText;
 
-        // Ticked by default: the whole point is that reaching a camera on
-        // another VLAN takes no typing. Anything unticked earlier in the session
-        // stays unticked.
+        // Local subnets ticked, routed ones (behind a VPN / another VLAN) not:
+        // sweeping the LAN this machine is on is the feature, but sweeping the
+        // far side of a tunnel someone happens to be on shouldn't happen without
+        // a deliberate tick. A choice the user already made this session wins
+        // over the default.
         foreach (var target in SafeTargets(scanTargets))
         {
-            ScanTargets.Add(new ScanTargetRowVm(
-                target, !cache.DeselectedTargets.Contains(target.Cidr), OnTargetToggled));
+            var selected = cache.TargetSelections.TryGetValue(target.Cidr, out var choice)
+                ? choice
+                : target.Origin == ScanTargetOrigin.LocalSubnet;
+            ScanTargets.Add(new ScanTargetRowVm(target, selected, OnTargetToggled));
         }
 
         // Field init skips the generated On*Changed hooks, so the rehydrated
@@ -169,11 +173,7 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
 
     private void OnTargetToggled(ScanTargetRowVm row)
     {
-        if (row.IsSelected)
-            _cache.DeselectedTargets.Remove(row.Target.Cidr);
-        else
-            _cache.DeselectedTargets.Add(row.Target.Cidr);
-
+        _cache.TargetSelections[row.Target.Cidr] = row.IsSelected;
         RecomputeRange();
     }
 
@@ -272,8 +272,8 @@ public sealed partial class DiscoveryDialogViewModel : ViewModelBase
             // dialog just told the user it would not run. When no targets were
             // offered at all there is nothing to untick, so Deep scan keeps its
             // original meaning of "sweep whatever subnet you can work out".
-            var sweep = DeepScan && (_effectiveRange is not null || ScanTargets.Count == 0);
-            var options = new DiscoveryOptions(TimeSpan.FromSeconds(6), sweep, _effectiveRange);
+            var doSweep = DeepScan && (_effectiveRange is not null || ScanTargets.Count == 0);
+            var options = new DiscoveryOptions(TimeSpan.FromSeconds(6), doSweep, _effectiveRange);
             var progress = new Progress<double>(p => ScanProgress = p);
 
             await foreach (var device in _aggregator.ScanAsync(options, progress, ct).ConfigureAwait(true))

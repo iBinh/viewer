@@ -21,6 +21,13 @@ public sealed class DiscoveryScanStore
     private const int MaxRetainedScans = 5;
     private static readonly TimeSpan RetainFor = TimeSpan.FromMinutes(10);
 
+    // A hard ceiling on how long any one run may take. The ONVIF listen window
+    // (options.Timeout) bounds the passive sources, but the sweep runs until it
+    // has probed every host, and a full private range is ~4096 hosts × 4 ports —
+    // a few minutes. This caps that so a background run can't linger; partial
+    // results found before the deadline are kept.
+    private static readonly TimeSpan MaxScanDuration = TimeSpan.FromMinutes(4);
+
     private readonly IDiscoveryAggregator _aggregator;
     private readonly ILogger<DiscoveryScanStore> _logger;
     private readonly ConcurrentDictionary<string, DiscoveryScan> _scans = new(StringComparer.Ordinal);
@@ -37,6 +44,7 @@ public sealed class DiscoveryScanStore
     {
         Prune();
         var scan = new DiscoveryScan(Guid.NewGuid().ToString("n"));
+        scan.CancelAfter(MaxScanDuration);
         _scans[scan.Id] = scan;
         _ = RunAsync(scan, options);
         return scan;
@@ -139,6 +147,10 @@ public sealed class DiscoveryScan : IDisposable
     }
 
     public void Cancel() => _cts.Cancel();
+
+    // Arms a deadline: the run self-cancels after the delay if it hasn't
+    // finished, keeping whatever it found so far.
+    public void CancelAfter(TimeSpan delay) => _cts.CancelAfter(delay);
 
     public void Finish(string status, string? error = null)
     {

@@ -43,25 +43,33 @@
          typing at all; the box below is for the odd range routes don't show.
          Bad input or an over-wide selection shows at the bottom and disables Scan. -->
     <StackPanel Grid.Row="1" Spacing="6" Margin="0,0,0,12">
-      <ItemsControl ItemsSource="{Binding ScanTargets}" IsVisible="{Binding HasScanTargets}">
-        <ItemsControl.ItemTemplate>
-          <DataTemplate DataType="vm:ScanTargetRowVm">
-            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
-                      IsEnabled="{Binding $parent[UserControl].((vm:DiscoveryDialogViewModel)DataContext).ScanInProgress, Converter={x:Static BoolConverters.Not}}"
-                      Margin="0,0,0,2">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Text="{Binding Cidr}"
-                           FontFamily="{StaticResource FontMono}"
-                           Foreground="{StaticResource TextPrimaryBrush}" />
-                <TextBlock Text="{Binding Detail}"
-                           FontSize="{StaticResource FontSizeSm}"
-                           VerticalAlignment="Center"
-                           Foreground="{StaticResource TextTertiaryBrush}" />
-              </StackPanel>
-            </CheckBox>
-          </DataTemplate>
-        </ItemsControl.ItemTemplate>
-      </ItemsControl>
+      <!-- The window is fixed-height, and a machine on several VLANs can turn up
+           many subnets, so the list scrolls inside a capped box instead of
+           pushing the rest of the dialog off the bottom. -->
+      <ScrollViewer IsVisible="{Binding HasScanTargets}"
+                    MaxHeight="132"
+                    HorizontalScrollBarVisibility="Disabled"
+                    VerticalScrollBarVisibility="Auto">
+        <ItemsControl ItemsSource="{Binding ScanTargets}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="vm:ScanTargetRowVm">
+              <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                        IsEnabled="{Binding $parent[UserControl].((vm:DiscoveryDialogViewModel)DataContext).ScanInProgress, Converter={x:Static BoolConverters.Not}}"
+                        Margin="0,0,0,2">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="{Binding Cidr}"
+                             FontFamily="{StaticResource FontMono}"
+                             Foreground="{StaticResource TextPrimaryBrush}" />
+                  <TextBlock Text="{Binding Detail}"
+                             FontSize="{StaticResource FontSizeSm}"
+                             VerticalAlignment="Center"
+                             Foreground="{StaticResource TextTertiaryBrush}" />
+                </StackPanel>
+              </CheckBox>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
 
       <TextBox Text="{Binding IpRangeText, Mode=TwoWay}"
                IsEnabled="{Binding !ScanInProgress}"
