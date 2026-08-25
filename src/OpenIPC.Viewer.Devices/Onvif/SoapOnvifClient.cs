@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security;
@@ -25,14 +26,18 @@ namespace OpenIPC.Viewer.Devices.Onvif;
 /// the "XmlType reflection error" on <c>Onvif.Core.Client.Common.DeviceEntity</c>.
 /// Same <see cref="IOnvifClient"/> contract, so the swap is one DI registration.
 ///
-/// Auth mirrors the old builder: preemptive HTTP Basic (OpenIPC's
-/// onvif_simple_server enforces it at the transport) plus a WS-Security
-/// UsernameToken password digest. GetSystemDateAndTime (unauthenticated) yields
-/// the camera clock offset the digest's Created stamp needs; it's cached per host.
+/// Auth is three things at once, because cameras disagree about which they
+/// want: preemptive HTTP Basic (OpenIPC's onvif_simple_server enforces it at
+/// the transport and never challenges), HTTP Digest answered on a 401 by an
+/// <see cref="HttpClient"/> whose handler carries the credentials, and a
+/// WS-Security UsernameToken password digest in the envelope.
+/// GetSystemDateAndTime (unauthenticated) yields the camera clock offset the
+/// token's Created stamp needs; it's cached per host.
 /// </summary>
 public sealed class SoapOnvifClient : IOnvifClient
 {
     private const string Soap = "http://www.w3.org/2003/05/soap-envelope";
+    private const string Soap11 = "http://schemas.xmlsoap.org/soap/envelope/";
     private const string Tds = "http://www.onvif.org/ver10/device/wsdl";
     private const string Trt = "http://www.onvif.org/ver10/media/wsdl";
     private const string Tptz = "http://www.onvif.org/ver20/ptz/wsdl";
@@ -52,19 +57,43 @@ public sealed class SoapOnvifClient : IOnvifClient
     // first authed call, refreshed on an auth fault.
     private readonly ConcurrentDictionary<string, TimeSpan> _shiftByHost = new(StringComparer.OrdinalIgnoreCase);
 
+    // One client per (host, user). A handler that carries credentials is what
+    // lets HttpClient answer a 401 challenge on its own, which is the only way
+    // to satisfy a camera that asks for Digest rather than Basic.
+    private readonly ConcurrentDictionary<string, HttpClient> _authedClients = new(StringComparer.Ordinal);
+
     public SoapOnvifClient(ILogger<SoapOnvifClient> logger)
     {
         _logger = logger;
+        _http = NewClient(credentials: null);
+    }
+
+    private static HttpClient NewClient(NetworkCredential? credentials)
+    {
         // onvif_simple_server is CGI-style: one request per connection, then it
         // closes the socket. Disable pooling so we never reuse a dead socket.
-        _http = new HttpClient(new SocketsHttpHandler
+        var handler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.Zero,
             ConnectTimeout = CallTimeout,
-        })
-        {
-            Timeout = CallTimeout,
         };
+        if (credentials is not null)
+        {
+            handler.Credentials = credentials;
+            // Let the camera state its terms first: preemptive auth would send
+            // Basic to a device that only accepts Digest.
+            handler.PreAuthenticate = false;
+        }
+        return new HttpClient(handler) { Timeout = CallTimeout };
+    }
+
+    private HttpClient ClientFor(Uri service, CameraCredentials? credentials)
+    {
+        if (credentials is not { } c || string.IsNullOrEmpty(c.Username)) return _http;
+
+        var key = $"{service.Host}:{service.Port}\u0000{c.Username}\u0000{c.Password}";
+        return _authedClients.GetOrAdd(key, _ =>
+            NewClient(new NetworkCredential(c.Username, c.Password ?? string.Empty)));
     }
 
     // --- Device service -----------------------------------------------------
@@ -126,7 +155,11 @@ public sealed class SoapOnvifClient : IOnvifClient
             $"<trt:ProfileToken>{Escape(profileToken)}</trt:ProfileToken></trt:GetStreamUri>";
 
         var body = await CallAuthedAsync(media, endpoint, $"{Trt}/GetStreamUri", reqBody, ct).ConfigureAwait(false);
-        var uri = Value(body, "Uri");
+        // The spec nests this as MediaUri/Uri, and Hikvision (among others) sends
+        // exactly that. Reading it as a direct child only matched the flatter
+        // shape onvif_simple_server returns, so a compliant camera looked like
+        // it had answered with no stream at all.
+        var uri = Descendant(body, "Uri")?.Value;
         if (string.IsNullOrWhiteSpace(uri))
             throw new InvalidOperationException($"GetStreamUri returned no URI for profile {profileToken}");
         return new Uri(uri, UriKind.Absolute);
@@ -194,7 +227,8 @@ public sealed class SoapOnvifClient : IOnvifClient
             $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken>" +
             $"<tptz:PresetName>{Escape(name)}</tptz:PresetName></tptz:SetPreset>";
         var body = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/SetPreset", reqBody, ct).ConfigureAwait(false);
-        return Value(body, "PresetToken") ?? string.Empty;
+        // Nested the same way on some firmwares, for the same reason.
+        return Descendant(body, "PresetToken")?.Value ?? string.Empty;
     }
 
     public async Task RemovePresetAsync(OnvifEndpoint endpoint, string profileToken, string presetToken, CancellationToken ct)
@@ -282,28 +316,21 @@ public sealed class SoapOnvifClient : IOnvifClient
 
     private async Task<XElement> CallAsync(Uri service, string action, string body, CameraCredentials? credentials, TimeSpan shift, CancellationToken ct)
     {
-        var header = SecurityHeader(credentials, shift);
-        var envelope =
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
-            $"<s:Envelope xmlns:s=\"{Soap}\">{header}<s:Body>{body}</s:Body></s:Envelope>";
+        // SOAP 1.2 first — the version ONVIF specifies. A camera that answers
+        // it with nothing usable gets one retry as SOAP 1.1, which several
+        // firmwares are built for and which costs one request to find out.
+        var (status, text) = await SendAsync(service, action, body, credentials, shift, soap12: true, ct)
+            .ConfigureAwait(false);
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, service);
-        req.Headers.ConnectionClose = true;
-        if (credentials is { } c && !string.IsNullOrEmpty(c.Username))
+        if (!IsUsable(text))
         {
-            var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{c.Username}:{c.Password}"));
-            req.Headers.Authorization = new AuthenticationHeaderValue("Basic", basic);
+            _logger.LogDebug("ONVIF {Action}: SOAP 1.2 gave HTTP {Status} and {Length} bytes; retrying as SOAP 1.1",
+                action, (int)status, text.Length);
+            (status, text) = await SendAsync(service, action, body, credentials, shift, soap12: false, ct)
+                .ConfigureAwait(false);
         }
 
-        var content = new StringContent(envelope, Encoding.UTF8);
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/soap+xml") { CharSet = "utf-8" };
-        content.Headers.ContentType.Parameters.Add(new NameValueHeaderValue("action", $"\"{action}\""));
-        req.Content = content;
-
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
-        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException($"ONVIF {action}: empty response (HTTP {(int)resp.StatusCode})");
+        if (string.IsNullOrWhiteSpace(text)) throw EmptyBody(action, status);
 
         XElement root;
         try { root = XDocument.Parse(text).Root!; }
@@ -311,7 +338,11 @@ public sealed class SoapOnvifClient : IOnvifClient
 
         var bodyEl = Child(Child(root, "Body"), null);
         if (bodyEl is null)
-            throw new InvalidOperationException($"ONVIF {action}: empty SOAP body");
+        {
+            _logger.LogDebug("ONVIF {Action}: HTTP {Status}, body: {Body}",
+                action, (int)status, text.Length > 400 ? text[..400] : text);
+            throw EmptyBody(action, status);
+        }
         if (bodyEl.Name.LocalName == "Fault")
         {
             var reason = Descendant(bodyEl, "Text")?.Value
@@ -321,6 +352,66 @@ public sealed class SoapOnvifClient : IOnvifClient
         }
         return bodyEl;
     }
+
+    private async Task<(HttpStatusCode Status, string Text)> SendAsync(
+        Uri service, string action, string body, CameraCredentials? credentials,
+        TimeSpan shift, bool soap12, CancellationToken ct)
+    {
+        var header = SecurityHeader(credentials, shift);
+        var envelope =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+            $"<s:Envelope xmlns:s=\"{(soap12 ? Soap : Soap11)}\">{header}<s:Body>{body}</s:Body></s:Envelope>";
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, service);
+        req.Headers.ConnectionClose = true;
+        if (credentials is { } c && !string.IsNullOrEmpty(c.Username))
+        {
+            // Preemptive Basic for onvif_simple_server, which enforces it at the
+            // transport and never challenges. A camera that wants Digest answers
+            // 401 instead, and the handler's credentials settle that exchange.
+            var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{c.Username}:{c.Password}"));
+            req.Headers.Authorization = new AuthenticationHeaderValue("Basic", basic);
+        }
+
+        var content = new StringContent(envelope, Encoding.UTF8);
+        if (soap12)
+        {
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/soap+xml") { CharSet = "utf-8" };
+            content.Headers.ContentType.Parameters.Add(new NameValueHeaderValue("action", $"\"{action}\""));
+        }
+        else
+        {
+            // SOAP 1.1 has no action parameter on the content type; it travels
+            // in a header of its own.
+            content.Headers.ContentType = new MediaTypeHeaderValue("text/xml") { CharSet = "utf-8" };
+            req.Headers.TryAddWithoutValidation("SOAPAction", $"\"{action}\"");
+        }
+        req.Content = content;
+
+        using var resp = await ClientFor(service, credentials)
+            .SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+        return (resp.StatusCode, await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false) ?? string.Empty);
+    }
+
+    // Worth reading: it parses, and its Body holds something. A firmware built
+    // for SOAP 1.1 typically answers a 1.2 request with no bytes at all or with
+    // an envelope whose Body is empty, and both mean "ask again differently".
+    // A fault is a usable answer — a camera that says why it refused is not
+    // asked twice.
+    private static bool IsUsable(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        try { return Child(Child(XDocument.Parse(text).Root!, "Body"), null) is not null; }
+        catch (Exception) { return false; }
+    }
+
+    // An empty body is what a camera sends when it will not say why. In
+    // practice it means ONVIF is switched off in the camera's own settings or
+    // the account has no ONVIF rights — neither of which arrives as a fault, so
+    // the message has to name them. The status code is the only other clue.
+    private static InvalidOperationException EmptyBody(string action, HttpStatusCode status) =>
+        new($"ONVIF {action}: the camera returned an empty SOAP body (HTTP {(int)status}). " +
+            "Check that ONVIF is enabled on the camera and that this account may use it.");
 
     private static string SecurityHeader(CameraCredentials? credentials, TimeSpan shift)
     {
