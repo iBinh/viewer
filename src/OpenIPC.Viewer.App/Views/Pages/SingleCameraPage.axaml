@@ -163,7 +163,7 @@
              every NVR keypad puts it. -->
         <Border Background="#90000000" CornerRadius="6" Padding="8" HorizontalAlignment="Right">
           <StackPanel Spacing="8">
-            <UniformGrid Rows="3" Columns="3">
+            <UniformGrid Rows="3" Columns="3" IsVisible="{Binding CanStepPanTilt}">
               <Button Classes="ptz-step" Content="↖" CommandParameter="upleft"
                       Command="{Binding StepCommand}" />
               <Button Classes="ptz-step" Content="↑" CommandParameter="up"
@@ -186,7 +186,7 @@
                       Command="{Binding StepCommand}" />
             </UniformGrid>
 
-            <Grid ColumnDefinitions="*,*">
+            <Grid ColumnDefinitions="*,*" IsVisible="{Binding CanStepZoom}">
               <Button Grid.Column="0" Classes="ptz-step" Content="−" CommandParameter="zoomout"
                       Command="{Binding StepCommand}" HorizontalAlignment="Stretch"
                       ToolTip.Tip="{Binding [Ptz.ZoomOut], Source={x:Static svc:Localizer.Instance}}" />
@@ -204,7 +204,7 @@
             <Button Classes="outlined"
                     Content="{Binding [Ptz.SetHome], Source={x:Static svc:Localizer.Instance}}"
                     Command="{Binding SetHomeCommand}"
-                    IsVisible="{Binding SupportsHome}"
+                    IsVisible="{Binding SupportsSetHome}"
                     FontSize="{StaticResource FontSizeXs}"
                     HorizontalAlignment="Stretch" />
           </StackPanel>

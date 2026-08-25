@@ -12,10 +12,19 @@ namespace OpenIPC.Viewer.Core.Onvif;
 // it. The UI asks this record what to show rather than offering buttons that
 // quietly do nothing.
 public sealed record PtzCapabilities(
-    bool SupportsContinuous,
-    bool SupportsRelative,
+    // Continuous and relative support, per axis pair: the spaces are declared
+    // separately, and plenty of cameras have one without the other — a
+    // pan/tilt-only dome, or a zoom-only box camera.
+    bool SupportsContinuousPanTilt,
+    bool SupportsContinuousZoom,
+    bool SupportsRelativePanTilt,
+    bool SupportsRelativeZoom,
     bool SupportsAbsolute,
+    // Home, as the PTZ node itself reports it (GetNode/HomeSupported) — never
+    // assumed. SetHome additionally requires the home position not to be
+    // fixed-by-hardware.
     bool SupportsHome,
+    bool SupportsSetHome,
     // GetStatus returns a MoveStatus this camera actually maintains. When
     // false, "has the move finished" can only be answered by waiting.
     bool SupportsMoveStatus,
@@ -34,10 +43,13 @@ public sealed record PtzCapabilities(
     // operation nearly every PTZ device implements, and what this app assumed
     // of every camera before it started asking.
     public static PtzCapabilities ContinuousOnly { get; } = new(
-        SupportsContinuous: true,
-        SupportsRelative: false,
+        SupportsContinuousPanTilt: true,
+        SupportsContinuousZoom: true,
+        SupportsRelativePanTilt: false,
+        SupportsRelativeZoom: false,
         SupportsAbsolute: false,
         SupportsHome: false,
+        SupportsSetHome: false,
         SupportsMoveStatus: false,
         RelativeIsFieldOfView: false,
         RelativePan: PtzRange.Normalized,
@@ -45,4 +57,10 @@ public sealed record PtzCapabilities(
         RelativeZoom: PtzRange.Normalized,
         AbsoluteZoom: PtzRange.Normalized,
         AuxiliaryCommands: Array.Empty<string>());
+
+    // Whether a step on the axis pair can be served at all — by RelativeMove,
+    // or by the timed continuous fallback. What the UI gates its keys on.
+    public bool CanStepPanTilt => SupportsRelativePanTilt || SupportsContinuousPanTilt;
+
+    public bool CanStepZoom => SupportsRelativeZoom || SupportsContinuousZoom;
 }

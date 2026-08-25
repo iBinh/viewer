@@ -30,11 +30,16 @@ public sealed class PtzController : IAsyncDisposable
     private Task? _pumpTask;
     private PtzCapabilities? _capabilities;
 
-    public PtzController(IOnvifClient client, OnvifEndpoint endpoint, string profileToken)
+    // knownCapabilities lets a caller that already holds the answer (the web
+    // API caches it per camera) skip the discovery round trips; null means
+    // fetch on first need.
+    public PtzController(IOnvifClient client, OnvifEndpoint endpoint, string profileToken,
+        PtzCapabilities? knownCapabilities = null)
     {
         _client = client;
         _endpoint = endpoint;
         _profileToken = profileToken;
+        _capabilities = knownCapabilities;
     }
 
     // Called by the joystick on PointerMoved while captured. The velocity must
@@ -103,33 +108,48 @@ public sealed class PtzController : IAsyncDisposable
     //
     // RelativeMove is the right operation for a step: a single request the
     // camera executes and finishes, where a continuous move has to be started
-    // and stopped and leaves the camera drifting if the stop is lost. Cameras
-    // without it fall back to a short timed continuous move — the timeout is
-    // the step length, so the camera stops itself even if the app dies mid-move.
+    // and stopped and leaves the camera drifting if the stop is lost. Each axis
+    // pair is decided on its own — pan/tilt and zoom are declared as separate
+    // spaces and plenty of cameras have one without the other. An axis with no
+    // relative space falls back to a short timed continuous move, but only
+    // where a continuous space is declared; an axis the camera can serve
+    // neither way is dropped rather than sent an operation that must fault.
     public async Task StepAsync(PtzVelocity step, float speed, CancellationToken ct)
     {
         var caps = await GetCapabilitiesAsync(ct).ConfigureAwait(false);
-        if (caps.SupportsRelative)
+
+        var wantsPanTilt = step.PanX != 0f || step.TiltY != 0f;
+        var wantsZoom = step.Zoom != 0f;
+
+        var relativePanTilt = wantsPanTilt && caps.SupportsRelativePanTilt;
+        var relativeZoom = wantsZoom && caps.SupportsRelativeZoom;
+        if (relativePanTilt || relativeZoom)
         {
+            // Translations scaled into each axis's declared range: zero stays
+            // zero (an untouched axis must not move), and a range like [0, 100]
+            // clamps rather than being sent a value below its own minimum.
             var scaled = new PtzVelocity(
-                caps.RelativePan.FromNormalized(step.PanX) - Midpoint(caps.RelativePan),
-                caps.RelativeTilt.FromNormalized(step.TiltY) - Midpoint(caps.RelativeTilt),
-                caps.RelativeZoom.FromNormalized(step.Zoom) - Midpoint(caps.RelativeZoom));
+                relativePanTilt ? caps.RelativePan.ScaleTranslation(step.PanX) : 0f,
+                relativePanTilt ? caps.RelativeTilt.ScaleTranslation(step.TiltY) : 0f,
+                relativeZoom ? caps.RelativeZoom.ScaleTranslation(step.Zoom) : 0f);
             await _client.RelativeMoveAsync(_endpoint, _profileToken, scaled, speed, ct).ConfigureAwait(false);
-            return;
         }
 
-        await _client.ContinuousMoveAsync(
-            _endpoint, _profileToken,
-            new PtzVelocity(step.PanX * speed, step.TiltY * speed, step.Zoom * speed),
-            StepFallbackDuration, ct).ConfigureAwait(false);
+        var fallbackPanTilt = wantsPanTilt && !relativePanTilt && caps.SupportsContinuousPanTilt;
+        var fallbackZoom = wantsZoom && !relativeZoom && caps.SupportsContinuousZoom;
+        if (fallbackPanTilt || fallbackZoom)
+        {
+            // The timeout is the step length, so the camera stops itself even
+            // if the app dies mid-move.
+            await _client.ContinuousMoveAsync(
+                _endpoint, _profileToken,
+                new PtzVelocity(
+                    fallbackPanTilt ? step.PanX * speed : 0f,
+                    fallbackPanTilt ? step.TiltY * speed : 0f,
+                    fallbackZoom ? step.Zoom * speed : 0f),
+                StepFallbackDuration, ct).ConfigureAwait(false);
+        }
     }
-
-    // A translation of zero must stay zero after scaling. The range maps
-    // normalized 0 onto its midpoint, which for an asymmetric range is not 0 —
-    // and a camera reading that as "move by midpoint" would drift on every step
-    // of an axis the user never touched.
-    private static float Midpoint(PtzRange range) => range.IsValid ? (range.Max + range.Min) / 2f : 0f;
 
     public Task GoHomeAsync(float speed, CancellationToken ct) =>
         _client.GotoHomeAsync(_endpoint, _profileToken, speed, ct);

@@ -61,7 +61,7 @@ public static class PtzApi
         // One nudge — the browser equivalent of the desktop step pad. Unlike
         // /move this needs no refresh loop and no stop: RelativeMove is a single
         // request the camera runs to completion, and PtzController falls back to
-        // a short self-stopping move on cameras that lack it.
+        // a short self-stopping move on cameras that declare a continuous space.
         app.MapPost("/api/v1/cameras/{id}/ptz/step", async (
             string id, PtzMoveRequest? body, HttpContext ctx, CancellationToken ct) =>
         {
@@ -71,9 +71,18 @@ public static class PtzApi
 
             var step = new PtzVelocity(Clamp(body?.PanX), Clamp(body?.TiltY), Clamp(body?.Zoom));
 
-            return await InvokeAsync(ctx, "step", () =>
-                new PtzController(target!.Value.Client, target.Value.Endpoint, target.Value.ProfileToken)
-                    .StepAsync(step, Speed(body?.Speed), ct));
+            return await InvokeAsync(ctx, "step", async () =>
+            {
+                // Seed the controller with cached capabilities so a step is one
+                // SOAP call, not a capability discovery per press; the cache
+                // fills from whichever request needed the answer first.
+                CapabilitiesCache.TryGetValue(id, out var known);
+                var controller = new PtzController(
+                    target!.Value.Client, target.Value.Endpoint, target.Value.ProfileToken, known);
+                await controller.StepAsync(step, Speed(body?.Speed), ct);
+                if (known is null)
+                    CapabilitiesCache[id] = await controller.GetCapabilitiesAsync(ct);
+            });
         });
 
         app.MapPost("/api/v1/cameras/{id}/ptz/home", async (
@@ -101,10 +110,13 @@ public static class PtzApi
             {
                 var caps = await target!.Value.Client.GetPtzCapabilitiesAsync(
                     target.Value.Endpoint, target.Value.ProfileToken, ct);
+                CapabilitiesCache[id] = caps;
                 return Results.Json(new
                 {
-                    relative = caps.SupportsRelative,
-                    absolute = caps.SupportsAbsolute,
+                    relativePanTilt = caps.SupportsRelativePanTilt,
+                    relativeZoom = caps.SupportsRelativeZoom,
+                    continuousPanTilt = caps.SupportsContinuousPanTilt,
+                    continuousZoom = caps.SupportsContinuousZoom,
                     home = caps.SupportsHome,
                     fieldOfView = caps.RelativeIsFieldOfView,
                 });
@@ -112,8 +124,18 @@ public static class PtzApi
             catch (Exception)
             {
                 // Continuous-only is the safe answer, and the one every PTZ
-                // camera can honour.
-                return Results.Json(new { relative = false, absolute = false, home = false, fieldOfView = false });
+                // camera can honour; the pad keeps its hold-to-sweep keys and
+                // gains nothing it cannot verify.
+                CapabilitiesCache[id] = PtzCapabilities.ContinuousOnly;
+                return Results.Json(new
+                {
+                    relativePanTilt = false,
+                    relativeZoom = false,
+                    continuousPanTilt = true,
+                    continuousZoom = true,
+                    home = false,
+                    fieldOfView = false,
+                });
             }
         });
 
@@ -179,6 +201,12 @@ public static class PtzApi
             });
         });
     }
+
+    // Capabilities are a property of the hardware, so one answer per camera per
+    // process is right; /capabilities refreshes the entry whenever the pad asks
+    // again (every mount), which also covers a camera swapped behind an id.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, PtzCapabilities> CapabilitiesCache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     // Everything a PTZ call needs: the ONVIF transport plus the camera's endpoint
     // and media profile. Credentials come from the secrets store, never the API.

@@ -75,8 +75,10 @@ export type GroupDto = { id: number; name: string; sortOrder: number }
 // What this camera's PTZ node can do, so the pad hides buttons it would only
 // fail with.
 export type PtzCapabilitiesDto = {
-  relative: boolean
-  absolute: boolean
+  relativePanTilt: boolean
+  relativeZoom: boolean
+  continuousPanTilt: boolean
+  continuousZoom: boolean
   home: boolean
   fieldOfView: boolean
 }

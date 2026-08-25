@@ -9,37 +9,40 @@ namespace OpenIPC.Viewer.Core.Tests.Onvif;
 public sealed class PtzRangeTests
 {
     [Fact]
-    public void ASymmetricRangeKeepsTheCentreAtZero()
+    public void OnTheDefaultRangeATranslationPassesThroughUnchanged()
     {
         var range = new PtzRange(-1f, 1f);
 
-        Assert.Equal(0f, range.FromNormalized(0f), 5);
-        Assert.Equal(1f, range.FromNormalized(1f), 5);
-        Assert.Equal(-1f, range.FromNormalized(-1f), 5);
+        Assert.Equal(0f, range.ScaleTranslation(0f), 5);
+        Assert.Equal(0.16f, range.ScaleTranslation(0.16f), 5);
+        Assert.Equal(-1f, range.ScaleTranslation(-1f), 5);
     }
 
     // Degrees, which is what a good number of domes report.
     [Fact]
-    public void ADegreeRangeScalesTheWholeWay()
+    public void ADegreeRangeScalesByItsHalfSpan()
     {
         var range = new PtzRange(-180f, 180f);
 
-        Assert.Equal(180f, range.FromNormalized(1f), 3);
-        Assert.Equal(-90f, range.FromNormalized(-0.5f), 3);
-        Assert.Equal(0f, range.FromNormalized(0f), 3);
+        Assert.Equal(180f, range.ScaleTranslation(1f), 3);
+        Assert.Equal(-90f, range.ScaleTranslation(-0.5f), 3);
+        Assert.Equal(0f, range.ScaleTranslation(0f), 3);
     }
 
-    // The case that makes a camera creep: on [0, 100] the centre is 50, not 0.
-    // Callers subtract the midpoint to turn this back into a translation, and
-    // that only works if the midpoint is where the mapping puts zero.
+    // The two properties an asymmetric range must keep at once: zero stays
+    // zero (an untouched axis must not creep), and nothing is ever sent
+    // outside the declared bounds — [0, 100] simply cannot go negative, so a
+    // negative step clamps to its floor instead of being sent below it.
     [Fact]
-    public void AnAsymmetricRangePutsZeroAtItsMidpoint()
+    public void AnAsymmetricRangeKeepsZeroAndNeverLeavesItsBounds()
     {
         var range = new PtzRange(0f, 100f);
 
-        Assert.Equal(50f, range.FromNormalized(0f), 3);
-        Assert.Equal(100f, range.FromNormalized(1f), 3);
-        Assert.Equal(0f, range.FromNormalized(-1f), 3);
+        Assert.Equal(0f, range.ScaleTranslation(0f), 3);
+        Assert.Equal(50f, range.ScaleTranslation(1f), 3);
+        Assert.Equal(8f, range.ScaleTranslation(0.16f), 3);
+        Assert.Equal(0f, range.ScaleTranslation(-0.16f), 3);   // clamped, not -8
+        Assert.Equal(0f, range.ScaleTranslation(-1f), 3);
     }
 
     [Theory]
@@ -47,7 +50,7 @@ public sealed class PtzRangeTests
     [InlineData(-2f, -1f)]
     [InlineData(99f, 1f)]
     public void InputBeyondTheUnitIntervalIsClampedBeforeScaling(float input, float expected) =>
-        Assert.Equal(expected, new PtzRange(-1f, 1f).FromNormalized(input), 5);
+        Assert.Equal(expected, new PtzRange(-1f, 1f).ScaleTranslation(input), 5);
 
     // Absolute zoom is [0, 1] at the UI, not [-1, 1].
     [Fact]
@@ -90,7 +93,7 @@ public sealed class PtzRangeTests
         var range = new PtzRange(min, max);
 
         Assert.False(range.IsValid);
-        Assert.Equal(0.5f, range.FromNormalized(0.5f), 5);
+        Assert.Equal(0.5f, range.ScaleTranslation(0.5f), 5);
         Assert.Equal(0.5f, range.FromUnit(0.5f), 5);
         Assert.Equal(0.5f, range.Clamp(0.5f), 5);
     }

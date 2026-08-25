@@ -17,8 +17,10 @@ const MOVE_TIMEOUT_MS = 1200
 // space in field-of-view units this is a sixth of the frame.
 const STEP = 0.16
 
-// A press shorter than this never sweeps far enough to matter, so it is
-// finished as the nudge the user meant. Holding still pans.
+// On a step-capable axis the sweep does not begin until a press has lasted this
+// long. A shorter press was never going to sweep anywhere useful, so it lands
+// as exactly one step — and because the sweep never started, there is no stop
+// racing the step on release.
 const TAP_MS = 220
 
 type Dir = { panX?: number; tiltY?: number; zoom?: number }
@@ -37,7 +39,10 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
   const timer = useRef<number | null>(null)
   const speedRef = useRef(speed)
   speedRef.current = speed
-  const pressedAt = useRef(0)
+  // One press is one of: 'pending' (step-capable, inside the tap window),
+  // 'sweeping' (continuous move running), 'idle'.
+  const press = useRef<'idle' | 'pending' | 'sweeping'>('idle')
+  const holdTimer = useRef<number | null>(null)
 
   const loadPresets = useCallback(async () => {
     try {
@@ -116,9 +121,26 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
     // Leaving the page (or switching camera) while held must not keep panning.
     return () => {
       if (timer.current !== null) window.clearInterval(timer.current)
+      if (holdTimer.current !== null) window.clearTimeout(holdTimer.current)
       void api.ptzStop(cameraId).catch(() => undefined)
     }
   }, [cameraId, loadPresets])
+
+  // A release inside the tap window sends one step; a longer press swept, so
+  // it sends one stop. The two never race because the sweep does not start
+  // until the window has passed.
+  const endPress = (dir: Dir | null) => {
+    if (holdTimer.current !== null) {
+      window.clearTimeout(holdTimer.current)
+      holdTimer.current = null
+    }
+    const mode = press.current
+    press.current = 'idle'
+    if (mode === 'sweeping') void stop()
+    // dir is null when the pointer was cancelled or captured away — nothing
+    // moved yet, and a step the user did not release on would be a surprise.
+    else if (mode === 'pending' && dir) step(dir)
+  }
 
   // Pointer capture keeps the release event ours even if the finger slides off
   // the button — otherwise a drag-away would leave the camera moving.
@@ -126,19 +148,24 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
     onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
       e.preventDefault()
       e.currentTarget.setPointerCapture(e.pointerId)
-      pressedAt.current = Date.now()
-      start(dir)
+      const canStep = dir.zoom ? caps?.relativeZoom : caps?.relativePanTilt
+      if (!canStep) {
+        // No step on this axis: the hold-to-sweep behaviour, immediately, as
+        // before capabilities existed.
+        press.current = 'sweeping'
+        start(dir)
+        return
+      }
+      press.current = 'pending'
+      holdTimer.current = window.setTimeout(() => {
+        press.current = 'sweeping'
+        holdTimer.current = null
+        start(dir)
+      }, TAP_MS)
     },
-    onPointerUp: () => {
-      const held = Date.now() - pressedAt.current
-      void stop()
-      // Too short to have swept anywhere: finish the gesture as a nudge. Only
-      // on cameras that implement RelativeMove — elsewhere the hold already
-      // did what it could.
-      if (held < TAP_MS && caps?.relative) step(dir)
-    },
-    onPointerCancel: () => void stop(),
-    onLostPointerCapture: () => void stop(),
+    onPointerUp: () => endPress(dir),
+    onPointerCancel: () => endPress(null),
+    onLostPointerCapture: () => endPress(null),
   })
 
   const savePreset = async () => {
@@ -167,8 +194,15 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
     }
   }
 
+  // Before capabilities load everything shows, as it always did; once they
+  // have, an axis the camera can serve neither way loses its keys instead of
+  // keeping buttons that can only fail.
+  const showPad = !caps || caps.relativePanTilt || caps.continuousPanTilt
+  const showZoom = !caps || caps.relativeZoom || caps.continuousZoom
+
   return (
     <div className="ptz">
+      {showPad && (
       <div className="ptz-pad">
         <button {...hold({ panX: -1, tiltY: 1 })} title={t('Ptz.UpLeft')}><Icon name="arrowUpLeft" size={18} /></button>
         <button {...hold({ tiltY: 1 })} title={t('Ptz.Up')}><Icon name="chevronUp" size={18} /></button>
@@ -189,13 +223,16 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
         <button {...hold({ tiltY: -1 })} title={t('Ptz.Down')}><Icon name="chevronDown" size={18} /></button>
         <button {...hold({ panX: 1, tiltY: -1 })} title={t('Ptz.DownRight')}><Icon name="arrowDownRight" size={18} /></button>
       </div>
+      )}
 
       <div className="ptz-side">
+        {showZoom && (
         <div className="ptz-zoom">
           <button {...hold({ zoom: 1 })} title={t('Ptz.ZoomIn')}><Icon name="plus" size={18} /></button>
           <span className="muted">{t('Ptz.Zoom')}</span>
           <button {...hold({ zoom: -1 })} title={t('Ptz.ZoomOut')}><Icon name="minus" size={18} /></button>
         </div>
+        )}
 
         <label>
           {t('Ptz.Speed')}

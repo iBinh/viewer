@@ -14,16 +14,15 @@ public readonly record struct PtzRange(float Min, float Max)
 
     public bool IsValid => Max > Min;
 
-    // Maps normalized [-1, 1] onto this range. A symmetric range ([-1,1],
-    // [-180,180]) keeps 0 at 0; an asymmetric one maps 0 to its midpoint, which
-    // is the only reading under which "no input" still means "centre".
-    public float FromNormalized(float value)
+    // A normalized [-1, 1] translation scaled onto this range's span: zero stays
+    // zero — a step that never touched an axis must not move it — and the result
+    // is clamped into the declared bounds, so a range like [0, 100] simply
+    // refuses to go negative rather than being sent a value below its minimum.
+    public float ScaleTranslation(float value)
     {
-        if (!IsValid) return value;
         var clamped = value < -1f ? -1f : value > 1f ? 1f : value;
-        var mid = (Max + Min) / 2f;
-        var half = (Max - Min) / 2f;
-        return mid + clamped * half;
+        if (!IsValid) return clamped;
+        return Clamp(clamped * (Max - Min) / 2f);
     }
 
     // Maps normalized [0, 1] onto this range — absolute zoom, where 0 is fully

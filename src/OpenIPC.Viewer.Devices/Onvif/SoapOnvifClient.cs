@@ -312,6 +312,7 @@ public sealed class SoapOnvifClient : IOnvifClient
         var relativeZoom = spaces is null ? null : Descendant(spaces, "RelativeZoomTranslationSpace");
         var absoluteZoom = spaces is null ? null : Descendant(spaces, "AbsoluteZoomPositionSpace");
         var continuousPanTilt = spaces is null ? null : Descendant(spaces, "ContinuousPanTiltVelocitySpace");
+        var continuousZoom = spaces is null ? null : Descendant(spaces, "ContinuousZoomVelocitySpace");
 
         // A space URI ending in TranslationSpaceFov means a step is a fraction
         // of the current field of view, so one press covers the same part of
@@ -319,14 +320,19 @@ public sealed class SoapOnvifClient : IOnvifClient
         var fov = relativePanTilt is not null
             && (Value(relativePanTilt, "URI") ?? "").Contains("TranslationSpaceFov", StringComparison.OrdinalIgnoreCase);
 
+        // Home is not advertised among the spaces; the node knows. A camera
+        // that cannot answer gets no home button rather than one that fails.
+        var (homeSupported, homeFixed) = await ReadHomeSupportAsync(ptz, endpoint, configToken, ct).ConfigureAwait(false);
+
         return new PtzCapabilities(
-            SupportsContinuous: continuousPanTilt is not null,
-            SupportsRelative: relativePanTilt is not null,
+            SupportsContinuousPanTilt: continuousPanTilt is not null,
+            SupportsContinuousZoom: continuousZoom is not null,
+            SupportsRelativePanTilt: relativePanTilt is not null,
+            SupportsRelativeZoom: relativeZoom is not null,
             SupportsAbsolute: absoluteZoom is not null,
-            // Home is not advertised among the spaces. The operation is
-            // optional and the only honest test is calling it, so it is offered
-            // and a refusal surfaces as a normal error.
-            SupportsHome: true,
+            SupportsHome: homeSupported,
+            // A fixed home position exists but cannot be overwritten.
+            SupportsSetHome: homeSupported && !homeFixed,
             SupportsMoveStatus: await SupportsMoveStatusAsync(ptz, endpoint, ct).ConfigureAwait(false),
             RelativeIsFieldOfView: fov,
             RelativePan: RangeOf(relativePanTilt, "XRange"),
@@ -335,6 +341,41 @@ public sealed class SoapOnvifClient : IOnvifClient
             AbsoluteZoom: RangeOf(absoluteZoom, "XRange"),
             AuxiliaryCommands: Array.Empty<string>());
     }
+
+    // Whether the node supports home at all, and whether its home position is
+    // fixed by hardware: GetConfiguration names the node, GetNode describes it.
+    // Both are reads a camera may refuse; refusing means no home controls, the
+    // same as before the buttons existed.
+    private async Task<(bool Supported, bool Fixed)> ReadHomeSupportAsync(
+        Uri ptz, OnvifEndpoint endpoint, string configToken, CancellationToken ct)
+    {
+        try
+        {
+            var conf = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/GetConfiguration",
+                $"<tptz:GetConfiguration xmlns:tptz=\"{Tptz}\">" +
+                $"<tptz:PTZConfigurationToken>{Escape(configToken)}</tptz:PTZConfigurationToken>" +
+                "</tptz:GetConfiguration>", ct).ConfigureAwait(false);
+            var nodeToken = Descendant(conf, "NodeToken")?.Value;
+            if (string.IsNullOrEmpty(nodeToken)) return (false, false);
+
+            var body = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/GetNode",
+                $"<tptz:GetNode xmlns:tptz=\"{Tptz}\">" +
+                $"<tptz:NodeToken>{Escape(nodeToken)}</tptz:NodeToken></tptz:GetNode>", ct).ConfigureAwait(false);
+            var node = Descendant(body, "PTZNode");
+            if (node is null) return (false, false);
+
+            return (XmlBool(Descendant(node, "HomeSupported")?.Value),
+                    XmlBool(Attr(node, "FixedHomePosition")));
+        }
+        catch (Exception)
+        {
+            return (false, false);
+        }
+    }
+
+    // xs:boolean allows both spellings.
+    private static bool XmlBool(string? value) =>
+        string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || value == "1";
 
     // Axes the caller left at zero are omitted rather than sent as zero: the
     // spec reads an absent element as "leave this axis alone", while an
@@ -363,9 +404,13 @@ public sealed class SoapOnvifClient : IOnvifClient
             $"<tptz:Translation>{panTilt}{zoom}</tptz:Translation>" +
             speedXml +
             "</tptz:RelativeMove>";
-        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/RelativeMove", reqBody, ct).ConfigureAwait(false);
+        // retryable: false — re-sending a translation the camera may already
+        // have executed is a double step.
+        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/RelativeMove", reqBody, ct, retryable: false).ConfigureAwait(false);
     }
 
+    // Positions come back exactly as the camera reported them, in its own
+    // declared units — see PtzStatus for why they are not normalized here.
     public async Task<PtzStatus> GetPtzStatusAsync(
         OnvifEndpoint endpoint, string profileToken, CancellationToken ct)
     {

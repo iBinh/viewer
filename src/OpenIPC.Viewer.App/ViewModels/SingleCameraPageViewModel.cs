@@ -139,6 +139,9 @@ public sealed partial class SingleCameraPageViewModel : ViewModelBase, IAsyncDis
     // rather than failing when pressed.
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SupportsHome))]
+    [NotifyPropertyChangedFor(nameof(SupportsSetHome))]
+    [NotifyPropertyChangedFor(nameof(CanStepPanTilt))]
+    [NotifyPropertyChangedFor(nameof(CanStepZoom))]
     private PtzCapabilities? _ptzCapabilities;
 
     // Move speed for steps, presets and home — the same 0..1 the joystick uses.
@@ -146,6 +149,15 @@ public sealed partial class SingleCameraPageViewModel : ViewModelBase, IAsyncDis
     [ObservableProperty] private double _ptzSpeed = 0.6;
 
     public bool SupportsHome => PtzCapabilities?.SupportsHome ?? false;
+
+    public bool SupportsSetHome => PtzCapabilities?.SupportsSetHome ?? false;
+
+    // Until the capabilities have loaded the keys stay visible — that is the
+    // pre-capability behaviour, and hiding them for the split second of the
+    // probe would make the panel flicker.
+    public bool CanStepPanTilt => PtzCapabilities is not { } c || c.CanStepPanTilt;
+
+    public bool CanStepZoom => PtzCapabilities is not { } c || c.CanStepZoom;
 
     // How far one press of an arrow moves, normalized. On a camera that reports
     // its relative space in field-of-view units this is a sixth of the frame —
