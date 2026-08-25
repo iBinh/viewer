@@ -28,10 +28,15 @@ public sealed class SoapOnvifClientInteropTests
         var caps = await NewClient().GetCapabilitiesAsync(camera.Endpoint(null), CancellationToken.None);
 
         Assert.NotNull(caps);
-        var attempts = camera.Requests.Where(r => r.Is("GetCapabilities")).ToList();
-        Assert.Equal(2, attempts.Count);
-        Assert.True(attempts[0].IsSoap12);
-        Assert.True(attempts[1].IsSoap11);
+        // The host's first exchange — the clock probe — is where the flip
+        // happens: 1.2, nothing usable, one retry as 1.1. Everything after
+        // leads with what that taught, so GetCapabilities is 1.1 on the first
+        // try rather than failing 1.2 again.
+        Assert.True(camera.Requests[0].IsSoap12);
+        Assert.True(camera.Requests[1].IsSoap11);
+        var capabilities = camera.Requests.Where(r => r.Is("GetCapabilities")).ToList();
+        Assert.Single(capabilities);
+        Assert.True(capabilities[0].IsSoap11);
     }
 
     // SOAP 1.1 carries the action in a header of its own rather than as a
@@ -125,6 +130,40 @@ public sealed class SoapOnvifClientInteropTests
         var uri = await NewClient().GetStreamUriAsync(camera.Endpoint(null), "Profile_1", CancellationToken.None);
 
         Assert.Equal("rtsp://10.16.33.231:554/Streaming/Channels/101", uri.ToString());
+    }
+
+    // The discovery costs one request per host, ever: once a host has answered
+    // 1.1 after failing 1.2, later calls lead with 1.1 instead of failing 1.2
+    // again first.
+    [Fact]
+    public async Task TheWorkingDialectIsRemembered()
+    {
+        using var camera = StubCamera.Start(req =>
+            req.IsSoap12 ? (string.Empty, 200) : (Envelope11(Capabilities()), 200));
+
+        var client = NewClient();
+        await client.GetCapabilitiesAsync(camera.Endpoint(null), CancellationToken.None);
+        await client.GetCapabilitiesAsync(camera.Endpoint(null), CancellationToken.None);
+
+        // Only the very first request on the host — the clock probe — went out
+        // as 1.2; everything after used what that probe learned.
+        Assert.Equal(1, camera.Requests.Count(r => r.IsSoap12));
+    }
+
+    // An unusable response does not prove the request was not executed. A
+    // camera that ran SetPreset and answered garbage must not be asked again —
+    // the resend would create a second preset — so mutations fail honestly
+    // instead of retrying in the other dialect.
+    [Fact]
+    public async Task AMutation_IsNeverRetriedInAnotherDialect()
+    {
+        using var camera = StubCamera.Start(req =>
+            req.Is("SetPreset") ? (string.Empty, 200) : (Envelope12(Capabilities()), 200));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            NewClient().SetPresetAsync(camera.Endpoint(null), "Profile_1", "Gate", CancellationToken.None));
+
+        Assert.Equal(1, camera.Requests.Count(r => r.Is("SetPreset")));
     }
 
     // --- helpers ------------------------------------------------------------

@@ -57,10 +57,24 @@ public sealed class SoapOnvifClient : IOnvifClient
     // first authed call, refreshed on an auth fault.
     private readonly ConcurrentDictionary<string, TimeSpan> _shiftByHost = new(StringComparer.OrdinalIgnoreCase);
 
-    // One client per (host, user). A handler that carries credentials is what
+    // Hosts that turned out to speak SOAP 1.1 only. Learned from the retry the
+    // first time a host answers 1.2 with nothing usable, then used as the first
+    // choice — so the discovery costs one extra request per host, ever, and a
+    // state-changing call is never the one doing the discovering.
+    private readonly ConcurrentDictionary<string, byte> _soap11Hosts = new(StringComparer.OrdinalIgnoreCase);
+
+    // One client per camera address. A handler that carries credentials is what
     // lets HttpClient answer a 401 challenge on its own, which is the only way
     // to satisfy a camera that asks for Digest rather than Basic.
-    private readonly ConcurrentDictionary<string, HttpClient> _authedClients = new(StringComparer.Ordinal);
+    //
+    // Keyed by host:port alone — a camera has one credential at a time — with
+    // the credential kept beside the client so a password change swaps the
+    // entry and disposes the superseded one, instead of caching every password
+    // this process has ever seen. Growth is bounded by the number of camera
+    // addresses. A plain lock rather than GetOrAdd: it also stops a concurrent
+    // miss from constructing a second client that nothing would ever dispose.
+    private readonly object _clientsGate = new();
+    private readonly Dictionary<string, (string Credential, HttpClient Client)> _authedClients = new(StringComparer.Ordinal);
 
     public SoapOnvifClient(ILogger<SoapOnvifClient> logger)
     {
@@ -91,9 +105,23 @@ public sealed class SoapOnvifClient : IOnvifClient
     {
         if (credentials is not { } c || string.IsNullOrEmpty(c.Username)) return _http;
 
-        var key = $"{service.Host}:{service.Port}\u0000{c.Username}\u0000{c.Password}";
-        return _authedClients.GetOrAdd(key, _ =>
-            NewClient(new NetworkCredential(c.Username, c.Password ?? string.Empty)));
+        var key = $"{service.Host}:{service.Port}";
+        var credential = $"{c.Username}\u0000{c.Password}";
+        lock (_clientsGate)
+        {
+            if (_authedClients.TryGetValue(key, out var entry))
+            {
+                if (entry.Credential == credential) return entry.Client;
+                // The password changed. A request in flight on the old client
+                // was sent with the old password and is failing anyway, so
+                // disposing under it loses nothing.
+                entry.Client.Dispose();
+            }
+
+            var client = NewClient(new NetworkCredential(c.Username, c.Password ?? string.Empty));
+            _authedClients[key] = (credential, client);
+            return client;
+        }
     }
 
     // --- Device service -----------------------------------------------------
@@ -226,7 +254,9 @@ public sealed class SoapOnvifClient : IOnvifClient
             $"<tptz:SetPreset xmlns:tptz=\"{Tptz}\">" +
             $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken>" +
             $"<tptz:PresetName>{Escape(name)}</tptz:PresetName></tptz:SetPreset>";
-        var body = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/SetPreset", reqBody, ct).ConfigureAwait(false);
+        // retryable: false — if the camera ran the request and answered
+        // garbage, a resend would create a second preset.
+        var body = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/SetPreset", reqBody, ct, retryable: false).ConfigureAwait(false);
         // Nested the same way on some firmwares, for the same reason.
         return Descendant(body, "PresetToken")?.Value ?? string.Empty;
     }
@@ -238,7 +268,10 @@ public sealed class SoapOnvifClient : IOnvifClient
             $"<tptz:RemovePreset xmlns:tptz=\"{Tptz}\">" +
             $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken>" +
             $"<tptz:PresetToken>{Escape(presetToken)}</tptz:PresetToken></tptz:RemovePreset>";
-        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/RemovePreset", reqBody, ct).ConfigureAwait(false);
+        // retryable: false — a resend after a successful-but-unreadable remove
+        // would fault on the now-missing preset and report failure for a
+        // removal that worked.
+        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/RemovePreset", reqBody, ct, retryable: false).ConfigureAwait(false);
     }
 
     // --- Transport ----------------------------------------------------------
@@ -265,25 +298,30 @@ public sealed class SoapOnvifClient : IOnvifClient
 
     // Authenticated call with a per-host clock shift; on a fault, refresh the
     // shift once and retry (covers a stale/absent offset causing digest rejection).
-    private async Task<XElement> CallAuthedAsync(Uri service, OnvifEndpoint endpoint, string action, string body, CancellationToken ct)
+    private async Task<XElement> CallAuthedAsync(Uri service, OnvifEndpoint endpoint, string action, string body, CancellationToken ct, bool retryable = true)
     {
         var host = endpoint.DeviceServiceUri.Host;
         if (!_shiftByHost.TryGetValue(host, out var shift))
         {
+            // Also where the host's SOAP dialect gets discovered, since this
+            // probe runs before the first real call — so by the time a mutation
+            // goes out, the dialect is already known.
             shift = await GetTimeShiftAsync(endpoint.DeviceServiceUri, ct).ConfigureAwait(false);
             _shiftByHost[host] = shift;
         }
 
         try
         {
-            return await CallAsync(service, action, body, endpoint.Credentials, shift, ct).ConfigureAwait(false);
+            return await CallAsync(service, action, body, endpoint.Credentials, shift, retryable, ct).ConfigureAwait(false);
         }
         catch (OnvifFaultException)
         {
-            // Maybe the clock drifted / the first shift was wrong — recompute and retry once.
+            // Maybe the clock drifted / the first shift was wrong — recompute and
+            // retry once. Safe for mutations too: a fault means the camera
+            // refused the request, not that it ran it.
             var fresh = await GetTimeShiftAsync(endpoint.DeviceServiceUri, ct).ConfigureAwait(false);
             _shiftByHost[host] = fresh;
-            return await CallAsync(service, action, body, endpoint.Credentials, fresh, ct).ConfigureAwait(false);
+            return await CallAsync(service, action, body, endpoint.Credentials, fresh, retryable, ct).ConfigureAwait(false);
         }
     }
 
@@ -293,7 +331,7 @@ public sealed class SoapOnvifClient : IOnvifClient
         {
             var body = await CallAsync(deviceService, $"{Tds}/GetSystemDateAndTime",
                 $"<tds:GetSystemDateAndTime xmlns:tds=\"{Tds}\"/>",
-                credentials: null, shift: TimeSpan.Zero, ct).ConfigureAwait(false);
+                credentials: null, shift: TimeSpan.Zero, retryable: true, ct).ConfigureAwait(false);
 
             var utc = Descendant(body, "UTCDateTime");
             var date = Child(utc, "Date");
@@ -314,20 +352,38 @@ public sealed class SoapOnvifClient : IOnvifClient
         }
     }
 
-    private async Task<XElement> CallAsync(Uri service, string action, string body, CameraCredentials? credentials, TimeSpan shift, CancellationToken ct)
+    private async Task<XElement> CallAsync(Uri service, string action, string body, CameraCredentials? credentials, TimeSpan shift, bool retryable, CancellationToken ct)
     {
-        // SOAP 1.2 first — the version ONVIF specifies. A camera that answers
-        // it with nothing usable gets one retry as SOAP 1.1, which several
-        // firmwares are built for and which costs one request to find out.
-        var (status, text) = await SendAsync(service, action, body, credentials, shift, soap12: true, ct)
+        // SOAP 1.2 first — the version ONVIF specifies — unless this host has
+        // already shown it only answers 1.1. A camera that answers the first
+        // choice with nothing usable gets one retry in the other dialect, which
+        // several firmwares need and which costs one request to find out. The
+        // winner is remembered per host, so the discovery happens once.
+        //
+        // Except for mutations (retryable: false). An unusable response does
+        // not prove the request was not executed — a camera that ran SetPreset
+        // and then answered garbage would get a duplicate preset from a resend.
+        // Mutations rely on the dialect already learned from this host's
+        // earlier read calls (the clock probe at minimum) and fail honestly
+        // rather than guessing.
+        var soap12First = !_soap11Hosts.ContainsKey(service.Host);
+        var (status, text) = await SendAsync(service, action, body, credentials, shift, soap12: soap12First, ct)
             .ConfigureAwait(false);
 
-        if (!IsUsable(text))
+        if (!IsUsable(text) && retryable)
         {
-            _logger.LogDebug("ONVIF {Action}: SOAP 1.2 gave HTTP {Status} and {Length} bytes; retrying as SOAP 1.1",
-                action, (int)status, text.Length);
-            (status, text) = await SendAsync(service, action, body, credentials, shift, soap12: false, ct)
+            _logger.LogDebug("ONVIF {Action}: SOAP {First} gave HTTP {Status} and {Length} bytes; retrying as SOAP {Second}",
+                action, soap12First ? "1.2" : "1.1", (int)status, text.Length, soap12First ? "1.1" : "1.2");
+            (status, text) = await SendAsync(service, action, body, credentials, shift, soap12: !soap12First, ct)
                 .ConfigureAwait(false);
+
+            if (IsUsable(text))
+            {
+                // The other dialect is the one this host speaks; remember it in
+                // whichever direction the flip went.
+                if (soap12First) _soap11Hosts[service.Host] = 1;
+                else _soap11Hosts.TryRemove(service.Host, out _);
+            }
         }
 
         if (string.IsNullOrWhiteSpace(text)) throw EmptyBody(action, status);
