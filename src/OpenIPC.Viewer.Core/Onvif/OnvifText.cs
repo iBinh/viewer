@@ -8,8 +8,16 @@ namespace OpenIPC.Viewer.Core.Onvif;
 // Cameras routinely store preset names as UTF-8 bytes but declare the SOAP
 // response as Latin-1, so a name like "Вход" arrives as "Ð'Ñ…Ð¾Ð´". The bytes are
 // intact — only the label was wrong — so recovering the byte behind each
-// character and decoding it as UTF-8 gives the original back. It costs nothing
-// on ASCII names and rescues every non-ASCII one.
+// character and decoding it as UTF-8 gives the original back.
+//
+// The repair runs only on unambiguous evidence: the decoded result must
+// contain a character outside Latin-1. A result that stays inside it — "Â©"
+// decoding to "©", "EntrÃ©e" to "Entrée" — proves nothing, because the
+// original is equally plausible as intentional text, and rewriting a name the
+// camera sent correctly is worse than leaving one broken. The cost is that
+// mojibake whose true text is itself Latin-1 (French, German names) stays as
+// sent — still legible — while the scripts that arrive as pure noise
+// (Cyrillic, Vietnamese, Greek) are the ones repaired.
 public static class OnvifText
 {
     public static string RepairMojibake(string value)
@@ -43,9 +51,17 @@ public static class OnvifText
             return value;
         }
 
-        // A pure-ASCII name decodes to itself; anything else means the repair
-        // found something, and a replacement char means it guessed wrong.
-        return decoded.Contains('�') ? value : decoded;
+        // Unambiguous only: a repair that never left Latin-1 cannot be told
+        // apart from a name that was already right, so the original stands. A
+        // replacement char means the guess was wrong outright.
+        if (decoded.Contains('�')) return value;
+
+        foreach (var c in decoded)
+        {
+            if (c > '\u00FF') return decoded;
+        }
+
+        return value;
     }
 
     // The 0x80–0x9F block of Windows-1252, the only place it differs from

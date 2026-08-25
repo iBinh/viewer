@@ -52,4 +52,15 @@ public sealed class OnvifTextTests
     [Fact]
     public void TextThatCouldNotHaveComeFromEitherDecoderIsLeftAlone() =>
         Assert.Equal(Cjk, OnvifText.RepairMojibake(Cjk));
+
+    // The ambiguous class: sequences that form valid UTF-8 whose decoded text
+    // is itself still Latin-1. "\u00C2\u00A9" would decode to "\u00A9", and
+    // "Entr\u00C3\u00A9e" to "Entr\u00E9e" — but both originals are equally
+    // plausible as intentional text, so neither is touched. Only a result that
+    // leaves Latin-1 is proof.
+    [Theory]
+    [InlineData("\u00C2\u00A9")]
+    [InlineData("Entr\u00C3\u00A9e")]
+    public void AResultThatStaysInsideLatin1_IsAmbiguousAndLeftAlone(string name) =>
+        Assert.Equal(name, OnvifText.RepairMojibake(name));
 }
