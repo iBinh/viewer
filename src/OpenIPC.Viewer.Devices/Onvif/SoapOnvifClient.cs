@@ -233,7 +233,11 @@ public sealed class SoapOnvifClient : IOnvifClient
 
         return Children(body, "Preset")
             .Where(p => !string.IsNullOrEmpty(Attr(p, "token")))
-            .Select(p => new PtzPreset(Token: Attr(p, "token"), Name: Value(p, "Name") ?? Attr(p, "token")))
+            // Names come back mangled from cameras that store UTF-8 and label
+            // the response Latin-1; the bytes survive, only the label was wrong.
+            .Select(p => new PtzPreset(
+                Token: Attr(p, "token"),
+                Name: OnvifText.RepairMojibake(Value(p, "Name") ?? Attr(p, "token"))))
             .ToList();
     }
 
@@ -275,6 +279,187 @@ public sealed class SoapOnvifClient : IOnvifClient
     }
 
     // --- Transport ----------------------------------------------------------
+
+    // --- PTZ capability, steps and home ------------------------------------
+
+    public async Task<PtzCapabilities> GetPtzCapabilitiesAsync(
+        OnvifEndpoint endpoint, string profileToken, CancellationToken ct)
+    {
+        var ptz = await ResolveServiceAsync(endpoint, ServiceKind.Ptz, ct).ConfigureAwait(false);
+
+        var configToken = await ResolvePtzConfigurationTokenAsync(endpoint, profileToken, ct).ConfigureAwait(false);
+        if (configToken is null) return PtzCapabilities.ContinuousOnly;
+
+        XElement options;
+        try
+        {
+            var reqBody =
+                $"<tptz:GetConfigurationOptions xmlns:tptz=\"{Tptz}\">" +
+                $"<tptz:ConfigurationToken>{Escape(configToken)}</tptz:ConfigurationToken>" +
+                "</tptz:GetConfigurationOptions>";
+            options = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/GetConfigurationOptions", reqBody, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Optional operation. A camera that will not describe itself gets
+            // the profile this app assumed of every camera before it asked.
+            return PtzCapabilities.ContinuousOnly;
+        }
+
+        var spaces = Descendant(options, "Spaces");
+        var relativePanTilt = spaces is null ? null : Descendant(spaces, "RelativePanTiltTranslationSpace");
+        var relativeZoom = spaces is null ? null : Descendant(spaces, "RelativeZoomTranslationSpace");
+        var absoluteZoom = spaces is null ? null : Descendant(spaces, "AbsoluteZoomPositionSpace");
+        var continuousPanTilt = spaces is null ? null : Descendant(spaces, "ContinuousPanTiltVelocitySpace");
+
+        // A space URI ending in TranslationSpaceFov means a step is a fraction
+        // of the current field of view, so one press covers the same part of
+        // the picture at any zoom.
+        var fov = relativePanTilt is not null
+            && (Value(relativePanTilt, "URI") ?? "").Contains("TranslationSpaceFov", StringComparison.OrdinalIgnoreCase);
+
+        return new PtzCapabilities(
+            SupportsContinuous: continuousPanTilt is not null,
+            SupportsRelative: relativePanTilt is not null,
+            SupportsAbsolute: absoluteZoom is not null,
+            // Home is not advertised among the spaces. The operation is
+            // optional and the only honest test is calling it, so it is offered
+            // and a refusal surfaces as a normal error.
+            SupportsHome: true,
+            SupportsMoveStatus: await SupportsMoveStatusAsync(ptz, endpoint, ct).ConfigureAwait(false),
+            RelativeIsFieldOfView: fov,
+            RelativePan: RangeOf(relativePanTilt, "XRange"),
+            RelativeTilt: RangeOf(relativePanTilt, "YRange"),
+            RelativeZoom: RangeOf(relativeZoom, "XRange"),
+            AbsoluteZoom: RangeOf(absoluteZoom, "XRange"),
+            AuxiliaryCommands: Array.Empty<string>());
+    }
+
+    // Axes the caller left at zero are omitted rather than sent as zero: the
+    // spec reads an absent element as "leave this axis alone", while an
+    // explicit zero is a command some cameras act on.
+    public async Task RelativeMoveAsync(
+        OnvifEndpoint endpoint, string profileToken, PtzVelocity step, float speed, CancellationToken ct)
+    {
+        var ptz = await ResolveServiceAsync(endpoint, ServiceKind.Ptz, ct).ConfigureAwait(false);
+
+        var panTilt = step.PanX != 0f || step.TiltY != 0f
+            ? $"<tt:PanTilt x=\"{Num(step.PanX)}\" y=\"{Num(step.TiltY)}\"/>"
+            : "";
+        var zoom = step.Zoom != 0f ? $"<tt:Zoom x=\"{Num(step.Zoom)}\"/>" : "";
+        if (panTilt.Length == 0 && zoom.Length == 0) return;
+
+        var speedXml = speed > 0f
+            ? "<tptz:Speed>" +
+              (panTilt.Length > 0 ? $"<tt:PanTilt x=\"{Num(speed)}\" y=\"{Num(speed)}\"/>" : "") +
+              (zoom.Length > 0 ? $"<tt:Zoom x=\"{Num(speed)}\"/>" : "") +
+              "</tptz:Speed>"
+            : "";
+
+        var reqBody =
+            $"<tptz:RelativeMove xmlns:tptz=\"{Tptz}\" xmlns:tt=\"{Tt}\">" +
+            $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken>" +
+            $"<tptz:Translation>{panTilt}{zoom}</tptz:Translation>" +
+            speedXml +
+            "</tptz:RelativeMove>";
+        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/RelativeMove", reqBody, ct).ConfigureAwait(false);
+    }
+
+    public async Task<PtzStatus> GetPtzStatusAsync(
+        OnvifEndpoint endpoint, string profileToken, CancellationToken ct)
+    {
+        var ptz = await ResolveServiceAsync(endpoint, ServiceKind.Ptz, ct).ConfigureAwait(false);
+        var reqBody =
+            $"<tptz:GetStatus xmlns:tptz=\"{Tptz}\">" +
+            $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken></tptz:GetStatus>";
+        var body = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/GetStatus", reqBody, ct).ConfigureAwait(false);
+
+        var position = Descendant(body, "Position");
+        var panTilt = position is null ? null : Descendant(position, "PanTilt");
+        var zoom = position is null ? null : Descendant(position, "Zoom");
+        var move = Descendant(body, "MoveStatus");
+
+        return new PtzStatus(
+            Pan: ParseFloat(Attr(panTilt, "x")) ?? 0f,
+            Tilt: ParseFloat(Attr(panTilt, "y")) ?? 0f,
+            Zoom: ParseFloat(Attr(zoom, "x")) ?? 0f,
+            PanTilt: MoveStateOf(move, "PanTilt"),
+            ZoomState: MoveStateOf(move, "Zoom"),
+            UtcTime: DateTime.TryParse(Descendant(body, "UtcTime")?.Value, out var utc) ? utc : null);
+    }
+
+    public async Task GotoHomeAsync(
+        OnvifEndpoint endpoint, string profileToken, float speed, CancellationToken ct)
+    {
+        var ptz = await ResolveServiceAsync(endpoint, ServiceKind.Ptz, ct).ConfigureAwait(false);
+        var speedXml = speed > 0f
+            ? $"<tptz:Speed><tt:PanTilt x=\"{Num(speed)}\" y=\"{Num(speed)}\"/></tptz:Speed>"
+            : "";
+        var reqBody =
+            $"<tptz:GotoHomePosition xmlns:tptz=\"{Tptz}\" xmlns:tt=\"{Tt}\">" +
+            $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken>{speedXml}" +
+            "</tptz:GotoHomePosition>";
+        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/GotoHomePosition", reqBody, ct).ConfigureAwait(false);
+    }
+
+    public async Task SetHomeAsync(OnvifEndpoint endpoint, string profileToken, CancellationToken ct)
+    {
+        var ptz = await ResolveServiceAsync(endpoint, ServiceKind.Ptz, ct).ConfigureAwait(false);
+        var reqBody =
+            $"<tptz:SetHomePosition xmlns:tptz=\"{Tptz}\">" +
+            $"<tptz:ProfileToken>{Escape(profileToken)}</tptz:ProfileToken></tptz:SetHomePosition>";
+        await CallAuthedAsync(ptz, endpoint, $"{Tptz}/SetHomePosition", reqBody, ct).ConfigureAwait(false);
+    }
+
+    // MoveStatus is optional, and several firmwares 400 on the call that
+    // reports whether they keep it. Not knowing is the same as not having it.
+    private async Task<bool> SupportsMoveStatusAsync(Uri ptz, OnvifEndpoint endpoint, CancellationToken ct)
+    {
+        try
+        {
+            var body = await CallAuthedAsync(ptz, endpoint, $"{Tptz}/GetServiceCapabilities",
+                $"<tptz:GetServiceCapabilities xmlns:tptz=\"{Tptz}\"/>", ct).ConfigureAwait(false);
+            var caps = Descendant(body, "Capabilities");
+            return caps is not null
+                && string.Equals(Attr(caps, "MoveStatus"), "true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private async Task<string?> ResolvePtzConfigurationTokenAsync(
+        OnvifEndpoint endpoint, string profileToken, CancellationToken ct)
+    {
+        var profiles = await GetProfilesAsync(endpoint, ct).ConfigureAwait(false);
+        foreach (var profile in profiles)
+            if (profile.Token == profileToken)
+                return profile.PtzConfigurationToken;
+        return null;
+    }
+
+    private static PtzRange RangeOf(XElement? space, string axis)
+    {
+        if (space is null) return PtzRange.Normalized;
+        var range = Descendant(space, axis);
+        if (range is null) return PtzRange.Normalized;
+        var min = ParseFloat(Value(range, "Min"));
+        var max = ParseFloat(Value(range, "Max"));
+        return min is null || max is null ? PtzRange.Normalized : new PtzRange(min.Value, max.Value);
+    }
+
+    private static PtzMoveState MoveStateOf(XElement? moveStatus, string axis) =>
+        (moveStatus is null ? null : Value(moveStatus, axis))?.ToUpperInvariant() switch
+        {
+            "IDLE" => PtzMoveState.Idle,
+            "MOVING" => PtzMoveState.Moving,
+            _ => PtzMoveState.Unknown,
+        };
+
+    private static float? ParseFloat(string? text) =>
+        float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
 
     private enum ServiceKind { Media, Ptz }
 

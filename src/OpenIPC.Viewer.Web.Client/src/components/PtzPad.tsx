@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type PtzPresetDto } from '../api'
+import { api, type PtzCapabilitiesDto, type PtzPresetDto } from '../api'
 import { useI18n } from '../i18n'
 import { Icon } from './Icon'
 
@@ -13,6 +13,14 @@ import { Icon } from './Icon'
 const REFRESH_MS = 500
 const MOVE_TIMEOUT_MS = 1200
 
+// How far one nudge moves, normalized. On a camera that reports its relative
+// space in field-of-view units this is a sixth of the frame.
+const STEP = 0.16
+
+// A press shorter than this never sweeps far enough to matter, so it is
+// finished as the nudge the user meant. Holding still pans.
+const TAP_MS = 220
+
 type Dir = { panX?: number; tiltY?: number; zoom?: number }
 
 export function PtzPad({ cameraId }: { cameraId: string }) {
@@ -22,12 +30,14 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
   const [presetName, setPresetName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [caps, setCaps] = useState<PtzCapabilitiesDto | null>(null)
 
   // Held in refs so the interval callback always reads the live values without
   // re-subscribing (a re-render mid-drag must not restart the refresh loop).
   const timer = useRef<number | null>(null)
   const speedRef = useRef(speed)
   speedRef.current = speed
+  const pressedAt = useRef(0)
 
   const loadPresets = useCallback(async () => {
     try {
@@ -50,6 +60,22 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
       setError(t('Ptz.Error'))
     }
   }, [cameraId, t])
+
+  // One nudge. Held buttons sweep, a tap frames — the same split the desktop
+  // keypad makes, and the only way to land on a doorway at full zoom.
+  const step = useCallback(
+    (dir: Dir) => {
+      void api
+        .ptzStep(cameraId, {
+          panX: (dir.panX ?? 0) * STEP,
+          tiltY: (dir.tiltY ?? 0) * STEP,
+          zoom: (dir.zoom ?? 0) * STEP,
+          speed: speedRef.current,
+        })
+        .catch(() => setError(t('Ptz.Error')))
+    },
+    [cameraId, t],
+  )
 
   const start = useCallback(
     (dir: Dir) => {
@@ -76,6 +102,16 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
   )
 
   useEffect(() => {
+    let cancelled = false
+    api
+      .ptzCapabilities(cameraId)
+      .then((c) => { if (!cancelled) setCaps(c) })
+      // A camera that will not describe itself keeps the plain Stop button.
+      .catch(() => { if (!cancelled) setCaps(null) })
+    return () => { cancelled = true }
+  }, [cameraId])
+
+  useEffect(() => {
     void loadPresets()
     // Leaving the page (or switching camera) while held must not keep panning.
     return () => {
@@ -90,9 +126,17 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
     onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
       e.preventDefault()
       e.currentTarget.setPointerCapture(e.pointerId)
+      pressedAt.current = Date.now()
       start(dir)
     },
-    onPointerUp: () => void stop(),
+    onPointerUp: () => {
+      const held = Date.now() - pressedAt.current
+      void stop()
+      // Too short to have swept anywhere: finish the gesture as a nudge. Only
+      // on cameras that implement RelativeMove — elsewhere the hold already
+      // did what it could.
+      if (held < TAP_MS && caps?.relative) step(dir)
+    },
     onPointerCancel: () => void stop(),
     onLostPointerCapture: () => void stop(),
   })
@@ -130,7 +174,16 @@ export function PtzPad({ cameraId }: { cameraId: string }) {
         <button {...hold({ tiltY: 1 })} title={t('Ptz.Up')}><Icon name="chevronUp" size={18} /></button>
         <button {...hold({ panX: 1, tiltY: 1 })} title={t('Ptz.UpRight')}><Icon name="arrowUpRight" size={18} /></button>
         <button {...hold({ panX: -1 })} title={t('Ptz.Left')}><Icon name="chevronLeft" size={18} /></button>
-        <button onClick={() => void stop()} title={t('Ptz.Stop')}><Icon name="stop" size={18} /></button>
+        {caps?.home ? (
+          <button
+            onClick={() => void api.ptzHome(cameraId, speed).catch(() => setError(t('Ptz.Error')))}
+            title={t('Ptz.Home')}
+          >
+            <Icon name="home" size={18} />
+          </button>
+        ) : (
+          <button onClick={() => void stop()} title={t('Ptz.Stop')}><Icon name="stop" size={18} /></button>
+        )}
         <button {...hold({ panX: 1 })} title={t('Ptz.Right')}><Icon name="chevronRight" size={18} /></button>
         <button {...hold({ panX: -1, tiltY: -1 })} title={t('Ptz.DownLeft')}><Icon name="arrowDownLeft" size={18} /></button>
         <button {...hold({ tiltY: -1 })} title={t('Ptz.Down')}><Icon name="chevronDown" size={18} /></button>
