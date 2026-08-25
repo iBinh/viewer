@@ -10,14 +10,14 @@ namespace OpenIPC.Viewer.Core.Onvif;
 // intact — only the label was wrong — so recovering the byte behind each
 // character and decoding it as UTF-8 gives the original back.
 //
-// The repair runs only on unambiguous evidence: the decoded result must
-// contain a character outside Latin-1. A result that stays inside it — "Â©"
-// decoding to "©", "EntrÃ©e" to "Entrée" — proves nothing, because the
-// original is equally plausible as intentional text, and rewriting a name the
-// camera sent correctly is worse than leaving one broken. The cost is that
-// mojibake whose true text is itself Latin-1 (French, German names) stays as
-// sent — still legible — while the scripts that arrive as pure noise
-// (Cyrillic, Vietnamese, Greek) are the ones repaired.
+// The repair runs only on evidence, in three tiers. A decoded result that
+// leaves Latin-1 (Cyrillic, Greek, the tonal half of Vietnamese) is proof
+// outright. One that stays inside Latin-1 but contains a *letter* — "EntrÃ©e"
+// decoding to "Entrée", "SÃ¢n" to "Sân" — is proof too, because the mangled
+// form ("Ã" chased by a currency sign) is not plausible as intentional text.
+// Only a result made purely of Latin-1 symbols is ambiguous: "Â©" decodes to
+// "©" and both readings are plausible, so the original stands — rewriting a
+// name the camera sent correctly is worse than leaving one broken.
 public static class OnvifText
 {
     public static string RepairMojibake(string value)
@@ -51,14 +51,16 @@ public static class OnvifText
             return value;
         }
 
-        // Unambiguous only: a repair that never left Latin-1 cannot be told
-        // apart from a name that was already right, so the original stands. A
-        // replacement char means the guess was wrong outright.
+        // A replacement char means the guess was wrong outright.
         if (decoded.Contains('�')) return value;
 
         foreach (var c in decoded)
         {
+            // Outside Latin-1: proof. A Latin-1 letter (0xC0–0xFF): also
+            // proof — its mangled form is a pair no one types on purpose.
+            // Symbols (©, °, ±) decide nothing.
             if (c > '\u00FF') return decoded;
+            if (c is >= '\u00C0' and <= '\u00FF') return decoded;
         }
 
         return value;

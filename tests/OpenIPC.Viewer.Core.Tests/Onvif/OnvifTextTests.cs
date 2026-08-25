@@ -53,14 +53,22 @@ public sealed class OnvifTextTests
     public void TextThatCouldNotHaveComeFromEitherDecoderIsLeftAlone() =>
         Assert.Equal(Cjk, OnvifText.RepairMojibake(Cjk));
 
-    // The ambiguous class: sequences that form valid UTF-8 whose decoded text
-    // is itself still Latin-1. "\u00C2\u00A9" would decode to "\u00A9", and
-    // "Entr\u00C3\u00A9e" to "Entr\u00E9e" — but both originals are equally
-    // plausible as intentional text, so neither is touched. Only a result that
-    // leaves Latin-1 is proof.
+    // The ambiguous class: a decode made purely of Latin-1 *symbols*.
+    // "\u00C2\u00A9" would decode to "\u00A9" (©), and both readings are
+    // plausible as intentional text, so the original stands.
     [Theory]
     [InlineData("\u00C2\u00A9")]
-    [InlineData("Entr\u00C3\u00A9e")]
-    public void AResultThatStaysInsideLatin1_IsAmbiguousAndLeftAlone(string name) =>
+    [InlineData("\u00C2\u00B0C")]
+    public void ASymbolOnlyDecode_IsAmbiguousAndLeftAlone(string name) =>
         Assert.Equal(name, OnvifText.RepairMojibake(name));
+
+    // A decode containing a Latin-1 *letter* is not ambiguous — "Ã" chased by
+    // a currency sign is a pair nobody types on purpose. This keeps French,
+    // German and the â/ê/ô half of Vietnamese repairable even though those
+    // letters live inside Latin-1.
+    [Theory]
+    [InlineData("Entr\u00C3\u00A9e", "Entr\u00E9e")]
+    [InlineData("S\u00C3\u00A2n", "S\u00E2n")]
+    public void ADecodeWithLatin1Letters_IsRepaired(string mangled, string expected) =>
+        Assert.Equal(expected, OnvifText.RepairMojibake(mangled));
 }
